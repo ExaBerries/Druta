@@ -1623,13 +1623,16 @@ class Druta:
             # because tuning a rail is something you do while watching a clock,
             # not after finishing with it.
             #
-            # autosize_y rather than a fixed height: these sections change
-            # height per card - one with no per-domain knobs, or no I2C
-            # profile, builds far fewer rows - so any height chosen here would
-            # clip one machine and leave a gap on another.
+            # PLAIN GROUPS, not child windows. A child window with
+            # autosize_y does NOT shrink to its contents - in ImGui that means
+            # "fill the remaining parent height" - so both columns claimed the
+            # whole tab and left roughly 800 px of dead space above the V/F
+            # editor. A group sizes to what is inside it, which is the actual
+            # requirement, and it also avoids giving each column its own
+            # scroll region. Widths come from the knob table itself, so a
+            # column can never be narrower than the rows it holds.
             with dpg.group(horizontal=True):
-                with dpg.child_window(width=self.s(sum(self.KNOB_COLS) + 34),
-                                      autosize_y=True, border=False):
+                with dpg.group():
                     with dpg.collapsing_header(label="Clock offsets", default_open=True):
                         with dpg.table(header_row=False, no_host_extendX=True,
                                        policy=dpg.mvTable_SizingFixedFit):
@@ -1802,8 +1805,8 @@ class Druta:
                                             fan_floor, self.apply_fan,
                                             extra=("Auto", self.fan_auto))
 
-                with dpg.child_window(width=self.s(sum(self.KNOB_COLS) + 34),
-                                      autosize_y=True, border=False):
+                dpg.add_spacer(width=self.s(18))
+                with dpg.group():
                     # RAILS GET THEIR OWN SECTION. The tab had grown past a screen and
                     # needed scrolling to reach knobs that matter, and these belong
                     # together on their own terms anyway: everything here acts on a
