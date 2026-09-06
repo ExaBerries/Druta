@@ -1902,7 +1902,9 @@ class Druta:
                             # 80 whole 6.25 mV bins and stays a quarter of the
                             # 2000 mV typo catcher the XOC banner names as the
                             # last bound left in Druta.
-                            xoc_lo=-500, xoc_hi=500)
+                            xoc_lo=-500, xoc_hi=500,
+                            extra=("Stock",
+                                   lambda: self.stock_knob("rail")))
 
                     # RAIL 1. Built only where the layout names a field for
                     # it, and gated on XOC because it is the one knob here that
@@ -1916,7 +1918,9 @@ class Druta:
                         self.slider_row(
                             "msvdd", "MSVDD offset (mV)  UNVERIFIED",
                             -50, 50, 0, self.apply_msvdd, color=BAD,
-                            xoc_lo=-150, xoc_hi=150)
+                            xoc_lo=-150, xoc_hi=150,
+                            extra=("Stock",
+                                   lambda: self.stock_knob("msvdd")))
 
                     # THE OTHER ROAD TO THE SAME RAIL, and the only knob in
                     # Druta with no firmware underneath it. Built only where a
@@ -1946,7 +1950,7 @@ class Druta:
                             int(tel.get("offset_mv") or 0),
                             self.apply_i2c_rail,
                             extra=[("Verify", self.verify_i2c_rail),
-                                   ("Stock", lambda: self.stock_knob("i2c"))],
+                                   ("Stock", lambda: self.stock_knob("i2crail"))],
                             color=BAD,
                             # The register's own representable range, not a
                             # policy: past it the field wraps through its sign
@@ -2048,10 +2052,20 @@ class Druta:
             # wants Verify AND Stock, and one slot cannot hold both.
             extras = ([] if not extra else
                       [extra] if isinstance(extra[0], str) else list(extra))
+            # ZERO-ARG closure, and that is not a style choice. DearPyGui
+            # inspects a callback's signature and passes (sender, app_data,
+            # user_data) up to its arity, so `lambda _c=xcb: _c()` gets the
+            # SENDER bound to _c - the default never applies - and then calls
+            # an integer. The exception is swallowed inside DPG, so the button
+            # simply does nothing. A factory keeps the late-binding right
+            # without giving the lambda a parameter for DPG to fill.
+            def _fire(f):
+                return lambda: f()
+
             for n, (lbl, xcb) in enumerate(extras):
                 tag = f"go_{key}_x" if n == 0 else f"go_{key}_x{n}"
                 dpg.add_button(label=lbl, tag=tag, width=-1,
-                               callback=lambda _c=xcb: _c())
+                               callback=_fire(xcb))
                 self._ctl_widgets.append(tag)
 
     # ---- slider <-> text box, and what either is allowed to reach ---------- #
