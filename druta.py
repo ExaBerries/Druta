@@ -1315,12 +1315,15 @@ class Druta:
         fields = (f"rel {GPU.abs_limit_mv(f, 'reliability'):.0f} / "
                   f"alt {GPU.abs_limit_mv(f, 'alt_reliability'):.0f} / "
                   f"vmin {GPU.rail_floor_mv(f):.0f} mV")
-        # The reach is quoted only for the rail it was MEASURED on. The same
-        # arithmetic applied to MSVDD would print a confident number for a rail
-        # whose bases were never pinned and whose boost behaviour was never
-        # observed, which is the overclaim this exists to avoid.
+        # The reach is quoted only for the rail it was MEASURED on. Everything
+        # NVVDD's numbers rest on - both bases, and how the two ceilings
+        # combine - was pinned against vcore under load. MSVDD has no such
+        # anchor: nothing on this card reads that rail back, so its bases are
+        # inherited from NVVDD by assumption and its absolutes are only as good
+        # as that assumption. Saying "not measured" beside them is the whole
+        # difference between a reading and a guess wearing a unit.
         reach = (f"-> {GPU.rail_ceiling_mv(f):.0f} mV" if rail == 0
-                 else "-> not measured")
+                 else "-> bases unmeasured")
         return ("NVVDD" if rail == 0 else "MSVDD") + " limits", fields, reach
 
     def risk_features(self):
