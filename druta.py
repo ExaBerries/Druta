@@ -289,6 +289,9 @@ class Druta:
         self._once = {}            # log-dedup state, keyed per source
         self._ctl_widgets = []     # write widgets greyed out while locked
         self._slider_ranges = {}   # knob key -> KnobRange, filled by slider_row
+        # knob key -> a hi bound the card is ALREADY carrying, which a
+        # narrowing must not drag it below. See ov_carryover().
+        self._carryover_hi = {}
         self._knob_cb = {}         # knob key -> its apply callback, for Stock
         self._xoc_bounds = False   # are the XOC bounds the ones on the knobs?
         # The slider and its text box write each other. DPG does not fire a
@@ -1391,6 +1394,7 @@ class Druta:
         state = self.gpu.read_volt_rail_state()
         # Before the readout, so the cap and the ceiling can never be shown
         # disagreeing for a frame.
+        self.ov_carryover(raw)
         self.sync_vcap_to_ceiling(raw)
         for r in (0, 1):
             cells = self.volt_limits_cells(raw, r, state)
@@ -2346,7 +2350,12 @@ class Druta:
             return None
         if r.xoc_lo is not None and self._xoc_bounds:
             return min(r.lo, r.xoc_lo), max(r.hi, r.xoc_hi)
-        return r.lo, r.hi
+        # Without XOC the bound is the normal one, EXCEPT where the card is
+        # already carrying something higher. Narrowing past a live value would
+        # either drag the knob below what the rail actually holds or make the
+        # value unre-appliable, and neither is what "stop it going higher"
+        # means.
+        return r.lo, max(r.hi, self._carryover_hi.get(key, r.hi))
 
     def knob_dragged(self, key):
         if self._knob_sync or not dpg.does_item_exist(f"in_{key}"):
@@ -2415,26 +2424,21 @@ class Druta:
             xoc = "xoc" in self.risk_features()
         was_xoc = self._xoc_bounds
         self._xoc_bounds = bool(xoc)
-        # UNTICKING XOC MUST NOT LEAVE THE CARD ABOVE THE VBIOS CEILING.
+        # UNTICKING XOC DOES NOT TOUCH THE CARD, by decision: a value already
+        # set above the non-XOC threshold may STAY, and what XOC-off buys is
+        # that nothing can be set above it from here on. So the widget bound
+        # narrows to the stock ceiling OR to whatever the rail is already
+        # carrying, whichever is higher - see ov_carryover(). Raising is
+        # blocked, lowering is not, and nothing is silently rewritten behind
+        # the user.
         #
-        # Everything below narrows the widget and moves the slider; none of it
-        # writes the card. For a clock offset that asymmetry is merely untidy
-        # and it is logged. For overvoltage it is not: that limit is the
-        # backstop holding the two ceilings below 1250 mV, so XOC on -> 1250 ->
-        # Apply -> XOC off would leave the rail permitted past the value the
-        # VBIOS set while the panel calmly read 1200, and the next refresh
-        # would put 1250 back on the slider ready to be re-committed.
-        #
-        # "Default headroom past the VBIOS ceiling is exactly zero" has to hold
-        # when the box goes off, not only when it was never ticked, so the
-        # field goes back to stock here. Edge-triggered, because this runs on
-        # state changes and a rail write on every pass would be its own bug.
-        if was_xoc and not xoc:
-            self.drop_ov_to_stock()
+        # The earlier version of this forced the field back to stock on the
+        # untick edge. That was safe and it was also not what was asked for.
+        _ = was_xoc
         for key, r in self._slider_ranges.items():
             if not dpg.does_item_exist(f"sl_{key}"):
                 continue
-            lo, hi = r.lo, r.hi
+            lo, hi = r.lo, max(r.hi, self._carryover_hi.get(key, r.hi))
             if xoc and r.xoc_lo is not None:
                 # XOC may only ever WIDEN. Taken as min/max against the normal
                 # pair rather than trusted from the XOC pair alone, because
@@ -3139,32 +3143,29 @@ class Druta:
         self.refresh_volt_limits()
         self.vf_read(force=True)
 
-    def drop_ov_to_stock(self):
-        """Put any above-stock overvoltage back, on both rails.
+    def ov_carryover(self, raw):
+        """Record any overvoltage the card is already carrying above stock.
 
-        Called when XOC goes off. Only the overvoltage field, and only when it
-        is actually above the power-on value: the two ceilings are left alone
-        because they were never the thing XOC was widening here, and lowering
-        a limit the user set deliberately is its own surprise.
+        Unticking XOC does not rewrite the card - a value set above the
+        non-XOC ceiling is allowed to stay - so the knob's bound has to make
+        room for it, or the very next narrowing would drag the slider below
+        what the rail actually holds and the number on screen would stop being
+        the number on the card.
 
-        Goes through reset_volt_rail_limits, which is ungated on purpose, so
-        this still works in the state it exists for - the moment the write
-        permission has just been taken away.
+        Recorded rather than enforced: this only ever RAISES a bound to meet a
+        value that is already live. Lowering stays available all the way down,
+        and nothing here permits setting a NEW value above stock.
         """
-        raw = self.gpu.read_volt_rail_limits()
-        if not raw:
-            return
-        for rail, fields in raw.items():
+        for rail, key in ((0, "vlim_ov"), (1, "vlim1_ov")):
+            fields = (raw or {}).get(rail)
+            if not fields:
+                continue
             cur = GPU.abs_limit_mv(fields, "overvoltage")
             stock = GPU.stock_limit_mv(rail, "overvoltage")
-            if cur <= stock + 0.5:
-                continue
-            ok, msg = self.gpu.reset_volt_rail_limits(
-                rail=rail, fields=("overvoltage",))
-            self.log(f"XOC off: {'NVVDD' if rail == 0 else 'MSVDD'} "
-                     f"overvoltage was {cur:.0f} mV, above the VBIOS "
-                     f"{stock:.0f} mV. Put back to stock - {msg}", ok)
-        self.refresh_volt_limits()
+            if cur > stock + 0.5:
+                self._carryover_hi[key] = int(round(cur))
+            else:
+                self._carryover_hi.pop(key, None)
 
     def refresh_rail_live(self):
         """Put the live rail voltages back on the panel, every tick.
