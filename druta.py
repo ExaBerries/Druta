@@ -1138,7 +1138,11 @@ class Druta:
     # readout because the two are one control: the number being ASKED for. The
     # live column keeps its place between them and Apply for the reason given
     # in slider_row - rows differ in whether they carry an extra button.
-    KNOB_COLS = (230, 340, 100, 95, 90, 80)
+    # label, slider, typed value, live, Apply, extra.
+    # Slider and value box were sized for numbers far longer
+    # than the 3-4 digits any knob here carries; the width they
+    # were wasting is what made the tab need scrolling.
+    KNOB_COLS = (210, 200, 66, 92, 78, 74)
 
     # Per-domain clock offsets, in the order they are shown. Only rows whose
     # domain the driver actually accepts are built (see build_control), so a
@@ -1779,6 +1783,20 @@ class Druta:
                     # NvAPI. Worth showing anyway - the factory value is NOT
                     # zero on every rail, and an external tool that has moved
                     # these is otherwise invisible from inside Druta.
+                    fan_floor = st.get("fan_min", 30)
+                    self.slider_row("fan", "Fan duty (%)", fan_floor, 100,
+                                    fan_floor, self.apply_fan,
+                                    extra=("Auto", self.fan_auto))
+
+            # RAILS GET THEIR OWN SECTION. The tab had grown past a screen and
+            # needed scrolling to reach knobs that matter, and these belong
+            # together on their own terms anyway: everything here acts on a
+            # VOLTAGE RAIL rather than on a clock or a budget, and two of them
+            # reach hardware by routes the driver never sees.
+            with dpg.collapsing_header(label="Rails", default_open=True):
+                with dpg.table(header_row=False, no_host_extendX=True,
+                               policy=dpg.mvTable_SizingFixedFit):
+                    self.knob_cols()
                     lim = self.gpu.read_volt_rail_limits()
                     if lim:
                         # One row per rail, across the table's OWN columns.
@@ -1941,22 +1959,18 @@ class Druta:
                             extra=("Stock",
                                    lambda: self.stock_knob("rail")))
 
-                    # RAIL 1. Built only where the layout names a field for
-                    # it, and gated on XOC because it is the one knob here that
-                    # CANNOT be verified: this card exposes no readback for
-                    # this rail, so a write is a request that was accepted and
-                    # never a change that was observed. The label says
-                    # UNVERIFIED rather than a note, because per-knob subtext
-                    # is no longer drawn and this is not a caveat to bury.
-                    _lay = self.gpu.clkdom_layout()
-                    if _lay is not None and _lay.msvdd_uv is not None:
-                        self.slider_row(
-                            "msvdd", "MSVDD offset (mV)  UNVERIFIED",
-                            -50, 50, 0, self.apply_msvdd, color=BAD,
-                            xoc_lo=-150, xoc_hi=150,
-                            extra=("Stock",
-                                   lambda: self.stock_knob("msvdd")))
-
+                    # THE MSVDD OFFSET KNOB IS GONE, and this note is what is
+                    # left of it. The clock-domain block has an MSVDD field at
+                    # +0x11C and Blackwell ACCEPTS writes to it - including on
+                    # control domains that move nothing at all, which is what
+                    # "accepted" is worth here. Against NVVDD as a positive
+                    # control it moved neither voltage nor board power, and the
+                    # rail limits later proved MSVDD IS reachable by a
+                    # different route entirely (worth ~20 W between 900 and
+                    # 1200 mV), so the offset field is not an unproven path to
+                    # something real - it is a field that does nothing while
+                    # looking like a voltage control. Use the MSVDD rail limits
+                    # below.
                     # THE OTHER ROAD TO THE SAME RAIL, and the only knob in
                     # Druta with no firmware underneath it. Built only where a
                     # regulator actually answered, so an unmodified card shows
@@ -1994,11 +2008,6 @@ class Druta:
                             # offering travel that can only be rejected.
                             xoc_lo=int(rp.hw_min_mv),
                             xoc_hi=int(rp.hw_max_mv))
-
-                    fan_floor = st.get("fan_min", 30)
-                    self.slider_row("fan", "Fan duty (%)", fan_floor, 100,
-                                    fan_floor, self.apply_fan,
-                                    extra=("Auto", self.fan_auto))
 
             with dpg.collapsing_header(label="V/F curve editor",
                                        default_open=True):
@@ -2397,26 +2406,6 @@ class Druta:
             return
         self.autosave_before("i2c-rail-offset")
         self.report(self.rail.set_offset_mv(float(v), acknowledged=True))
-
-    def apply_msvdd(self, v):
-        """Rail 1. Gated on XOC, and honest about what it cannot prove.
-
-        Kept separate from apply_rail rather than folded in with a rail
-        argument: they are not the same knob. The core rail is measured 1:1
-        against a reading this app can take, and this one is a write into a
-        field whose identity comes from outside this project and whose effect
-        nothing here can see. Sharing a handler would imply a parity that the
-        evidence does not support.
-        """
-        if not self.guard():
-            return
-        if not (dpg.does_item_exist("xoc_mode") and dpg.get_value("xoc_mode")):
-            self.log("MSVDD: tick XOC first. This rail has no readback on this "
-                     "card, so the write cannot be verified - that is the "
-                     "class of thing XOC exists to gate.", False)
-            return
-        self.autosave_before("msvdd-offset")
-        self.report(self.gpu.set_rail_offset_mv(int(v), 0, rail=1))
 
     def apply_rail(self, v):
         # An undo point, like the core offset and unlike the other single
