@@ -1235,7 +1235,7 @@ class Druta:
     # floor and shares nothing with either ceiling.
     VLIM_LINKED = ("reliability", "alt_reliability")
 
-    def apply_vlim(self, **limits):
+    def apply_vlim(self, rail=0, **limits):
         """Write one NVVDD limit and report what the card actually took.
 
         One knob per FIELD, passed straight through. Druta does not synthesise
@@ -1257,8 +1257,16 @@ class Druta:
             if len(named) == 1:
                 limits = dict(limits, **{k: limits[named[0]]
                                          for k in self.VLIM_LINKED})
-        ok, msg = self.gpu.set_volt_rail_limits(0, **limits)
+        ok, msg = self.gpu.set_volt_rail_limits(rail, **limits)
         self.log(msg, ok)
+        if ok and rail == 1:
+            # Say it on every MSVDD write, not once in a tooltip. The write
+            # landing proves the register took the value and nothing more:
+            # this card exposes no MSVDD voltage anywhere, so there is no
+            # observation available that could confirm the rail moved.
+            self.log("MSVDD: stored and read back, but this card exposes no "
+                     "MSVDD rail voltage - nothing here can confirm the rail "
+                     "actually moved. Cross-check externally.", False)
         self.refresh_volt_limits()
 
     def apply_vlim_reset(self):
@@ -1288,8 +1296,12 @@ class Druta:
         # up to is in the readout line above, not folded into a slider.
         for key, field in (("vlim_rel", "reliability"),
                            ("vlim_alt", "alt_reliability"),
-                           ("vlim_lo", "vmin")):
-            val = int(round(GPU.abs_limit_mv(raw[0], field)))
+                           ("vlim_lo", "vmin"),
+                           ("vlim1_rel", "reliability"),
+                           ("vlim1_alt", "alt_reliability"),
+                           ("vlim1_lo", "vmin")):
+            val = int(round(GPU.abs_limit_mv(
+                raw[1 if key.startswith("vlim1") else 0], field)))
             for pre in ("sl_", "in_"):
                 if dpg.does_item_exist(pre + key):
                     dpg.set_value(pre + key, val)
@@ -1322,8 +1334,15 @@ class Druta:
         # inherited from NVVDD by assumption and its absolutes are only as good
         # as that assumption. Saying "not measured" beside them is the whole
         # difference between a reading and a guess wearing a unit.
+        # MSVDD's reliability and vmin bases ARE corroborated: asking for
+        # 950/750 produces the same deltas an external tool leaves for the same
+        # request. Its alt_reliability base is not - that tool never writes the
+        # field - and no reading of the rail exists either way, so the effect
+        # of any of it stays unobservable from here. "no rail readback" is the
+        # honest summary: not that the numbers are guesses, but that nothing
+        # can confirm what they do.
         reach = (f"-> {GPU.rail_ceiling_mv(f):.0f} mV" if rail == 0
-                 else "-> bases unmeasured")
+                 else "-> no rail readback")
         return ("NVVDD" if rail == 0 else "MSVDD") + " limits", fields, reach
 
     def risk_features(self):
@@ -1384,7 +1403,8 @@ class Druta:
         # it cannot outlive the state that justified it. Nothing but Druta
         # bounds this value, so it must never be on by default.
         GPU.volt_limits_write_enabled = "volt_limits" in live
-        for k in ("vlim_rel", "vlim_alt", "vlim_lo"):
+        for k in ("vlim_rel", "vlim_alt", "vlim_lo",
+                  "vlim1_rel", "vlim1_alt", "vlim1_lo"):
             for pre in ("sl_", "in_", "go_"):
                 if dpg.does_item_exist(pre + k):
                     dpg.configure_item(pre + k,
@@ -1754,18 +1774,59 @@ class Druta:
                             "vlim_rel", "NVVDD reliability (mV)", lo_mv, hi_mv,
                             int(round(GPU.abs_limit_mv(lim[0],
                                                        "reliability"))),
-                            lambda v: self.apply_vlim(reliability=v),
+                            lambda v: self.apply_vlim(0, reliability=v),
                             extra=("Stock", self.apply_vlim_reset))
                         self.slider_row(
                             "vlim_alt", "NVVDD alt-reliability (mV)",
                             lo_mv, hi_mv,
                             int(round(GPU.abs_limit_mv(lim[0],
                                                        "alt_reliability"))),
-                            lambda v: self.apply_vlim(alt_reliability=v))
+                            lambda v: self.apply_vlim(0, alt_reliability=v))
                         self.slider_row(
                             "vlim_lo", "NVVDD vmin (mV)", lo_mv, hi_mv,
                             int(round(GPU.rail_floor_mv(lim[0]))),
-                            lambda v: self.apply_vlim(vmin=v))
+                            lambda v: self.apply_vlim(0, vmin=v))
+
+                        # MSVDD, and the label says UNVERIFIED for a reason
+                        # that is not caution: the write demonstrably lands -
+                        # all three fields store and read back exactly - but
+                        # NOTHING ON THIS CARD READS THE MSVDD RAIL. A second
+                        # sweep across seven volt-family structs, including a
+                        # full version sweep of the rails status call, moved
+                        # exactly one dword under load and it was NVVDD's. So
+                        # the read-back proves storage and cannot prove effect,
+                        # and the bases these millivolts are computed from are
+                        # inherited from NVVDD by assumption. Exposed anyway,
+                        # because a knob that can be cross-checked against an
+                        # external reading is how that assumption stops being
+                        # one - and unverifiable is a thing to SAY, not a
+                        # reason to hide the control.
+                        with dpg.table_row():
+                            dpg.add_text("MSVDD", color=WARN)
+                            dpg.add_text("UNVERIFIED - stores and reads back, "
+                                         "but no MSVDD rail voltage is exposed "
+                                         "on this card to confirm the effect",
+                                         color=WARN,
+                                         wrap=self.s(self.KNOB_COLS[1]))
+                        self.slider_row(
+                            "vlim1_rel", "MSVDD reliability (mV)",
+                            lo_mv, hi_mv,
+                            int(round(GPU.abs_limit_mv(lim[1],
+                                                       "reliability"))),
+                            lambda v: self.apply_vlim(1, reliability=v),
+                            color=WARN)
+                        self.slider_row(
+                            "vlim1_alt", "MSVDD alt-reliability (mV)",
+                            lo_mv, hi_mv,
+                            int(round(GPU.abs_limit_mv(lim[1],
+                                                       "alt_reliability"))),
+                            lambda v: self.apply_vlim(1, alt_reliability=v),
+                            color=WARN)
+                        self.slider_row(
+                            "vlim1_lo", "MSVDD vmin (mV)", lo_mv, hi_mv,
+                            int(round(GPU.rail_floor_mv(lim[1]))),
+                            lambda v: self.apply_vlim(1, vmin=v),
+                            color=WARN)
 
                     # A SECOND mechanism on the same rail as the boost above,
                     # and the note says so: they are different calls, neither
