@@ -1406,10 +1406,10 @@ class Druta:
         # as that assumption. Saying "not measured" beside them is the whole
         # difference between a reading and a guess wearing a unit.
         # MSVDD's reliability and vmin bases ARE corroborated: asking for
-        # 950/750 produces the same deltas an external tool leaves for the same
-        # request. Its alt_reliability base is not - that tool never writes the
-        # field - and no reading of the rail exists either way, so the effect
-        # of any of it stays unobservable from here. "no rail readback" is the
+        # 950/750 reproduces the deltas the card was independently observed
+        # holding for those same limits. Its alt_reliability base is not, and
+        # no reading of the rail exists either way, so the effect of any of it
+        # stays unobservable from here. "no rail readback" is the
         # honest summary: not that the numbers are guesses, but that nothing
         # can confirm what they do.
         reach = (f"-> {GPU.rail_ceiling_mv(f):.0f} mV" if rail == 0
@@ -1800,13 +1800,12 @@ class Druta:
                                             extra=("Stock",
                                                    lambda: self.stock_knob("volt")))
 
-                            # The ceiling the boost slider above is actually working
-                            # against. READ-ONLY, and that is a finding rather than a
-                            # choice: nvbackend.GPU.read_volt_rail_limits records the
-                            # search that found no setter for this block anywhere in
-                            # NvAPI. Worth showing anyway - the factory value is NOT
-                            # zero on every rail, and an external tool that has moved
-                            # these is otherwise invisible from inside Druta.
+                            # The ceiling the boost slider above is actually
+                            # working against. Worth showing rather than
+                            # leaving implicit: the power-on value is NOT zero
+                            # on every rail, so it cannot be inferred, and
+                            # anything outside Druta that has moved these would
+                            # otherwise be invisible from in here.
                             fan_floor = st.get("fan_min", 30)
                             self.slider_row("fan", "Fan duty (%)", fan_floor, 100,
                                             fan_floor, self.apply_fan,

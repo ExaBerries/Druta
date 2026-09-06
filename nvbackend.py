@@ -3049,8 +3049,8 @@ class GPU:
         return None
 
     # ---- per-rail voltage limits ----------------------------------------- #
-    # The rail limit block. Read-only, and the read-only part is a finding
-    # rather than a design choice - see the end of this comment.
+    # The rail limit block. Readable here; written by set_volt_rail_limits,
+    # which does NOT go through NvAPI - see the end of this comment for why.
     #
     # LAYOUT, established here by probing, not from any third-party header:
     #   id 0xA3070DB0, version word 0x00020AC8 (v2, 2760 bytes)
@@ -3060,12 +3060,12 @@ class GPU:
     #     +0x0C overvoltage  +0x10 vmin
     #
     # The four limits are SIGNED MICROVOLT DELTAS from a fixed 1040 mV base,
-    # not absolute ceilings. That was confirmed by reconstruction: with an
-    # external tool holding NVVDD 900/1150 and MSVDD 750/950, this block read
-    # NVVDD reliability +110 / vmin +100 and MSVDD reliability -90 / vmin -50,
-    # and 1040+110, 800+100, 1040-90, 800-50 give back all four numbers
-    # exactly. NVVDD alt_reliability read +90 => 1060, which is precisely the
-    # ceiling measured on this card before the id was known.
+    # not absolute ceilings. Confirmed by reconstruction: with the card held at
+    # NVVDD 900/1150 and MSVDD 750/950, this block read NVVDD reliability +110
+    # / vmin +100 and MSVDD reliability -90 / vmin -50, and 1040+110, 800+100,
+    # 1040-90, 800-50 give back all four numbers exactly. NVVDD
+    # alt_reliability read +90 => 1060, precisely the ceiling measured on this
+    # card before the id was known.
     #
     # THE FACTORY STATE IS NOT ALL ZERO. On this GB203 the card powers up with
     # NVVDD at 0 and MSVDD reliability at -50000, i.e. NVVDD capped at the full
@@ -3078,20 +3078,22 @@ class GPU:
     # display-stack reset (Win+Ctrl+Shift+B). A PnP restart of the adapter
     # returns it to the factory values above.
     #
-    # THERE IS NO SETTER, and this was searched exhaustively rather than
-    # assumed. The rails RM commands GET_CONTROL/SET_CONTROL (0x2080B203 and
-    # 0x2080B204) do not occur anywhere in nvapi64.dll as immediates. The
-    # modern unified command 0x2080F214 has exactly three owning exports -
-    # 0x9C4BB8D0 (info), 0x2C73AFDC (status) and 0xA3070DB0 (this one) - and
-    # every one of them reads. 0x5D0634EE, which sits between them in the id
-    # table and accepts the same 2760-byte struct, also returns data when
-    # called, so it is a fourth getter and not the setter its position
-    # suggests. Writes through it are accepted and applied nowhere: a full
+    # NO NVAPI EXPORT WRITES THIS BLOCK, and that was searched exhaustively
+    # rather than assumed - which is why set_volt_rail_limits goes to RM
+    # directly instead. The rails RM commands GET_CONTROL/SET_CONTROL
+    # (0x2080B203 and 0x2080B204) do not occur anywhere in nvapi64.dll as
+    # immediates. The unified command 0x2080F214 has exactly three owning
+    # exports - 0x9C4BB8D0 (info), 0x2C73AFDC (status) and 0xA3070DB0 (this
+    # one) - and every one of them reads. 0x5D0634EE, which sits between them
+    # in the id table and accepts the same 2760-byte struct, also returns data
+    # when called, so it is a fourth getter and not the setter its position
+    # suggests: writes through it are accepted and applied nowhere, with a full
     # sweep of the header dwords and of every unused dword in a record, as
-    # candidate "valid" masks, moved nothing. NVIDIA's own published
-    # ctrl2080volt.h carries no commands or structs at all, so there is no
-    # first-party route either. Anything that does write these limits is
-    # therefore building an RM control call by hand against the kernel driver.
+    # candidate "valid" masks, moving nothing. The vendor's published
+    # ctrl2080volt.h carries no commands or structs at all.
+    #
+    # "No export" is not "no write path", and conflating the two is what kept
+    # this read-only for longer than it needed to be.
     def read_volt_rail_limits(self):
         """Per-rail voltage limits as millivolt deltas, or ``None``.
 
@@ -3150,8 +3152,8 @@ class GPU:
     # so reliability is the base the voltage-boost slider climbs FROM, and
     # alt_reliability is a hard clamp over the result. Row 2 is why writing
     # reliability alone does nothing, and row 4 is why writing BOTH to the
-    # requested ceiling - which is what an external tool leaves behind - makes
-    # the boost slider inert: 0% and 100% both land on the same volt.
+    # requested ceiling makes the boost slider inert: 0% and 100% then land on
+    # the same volt.
     #
     # The headroom is the VBIOS over-voltage allowance and is exactly the gap
     # between the two bases, so it is derived rather than hardcoded.
