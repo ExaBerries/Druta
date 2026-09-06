@@ -171,6 +171,11 @@ class NvAPI:
         # Per-rail voltage LIMITS, read-only. There is no matching setter: see
         # GPU.read_volt_rail_limits for what was searched and what was found.
         self.VoltRailsCtlGet = self._i(0xA3070DB0, PTR, PTR)
+        # The same rails as ABSOLUTE microvolts, including a LIVE per-rail
+        # voltage. See GPU.read_volt_rail_state: this is the block that makes a
+        # limit write checkable against a number the card produced rather than
+        # against an echo of the delta we sent.
+        self.VoltRailsAbs = self._i(0x5D0634EE, PTR, PTR)
         # Per-domain clock offsets - the ONLY path to XBAR. Neither NVML's
         # clock offsets nor NVAPI's Pstates20 can reach it: both enumerate
         # exactly two domains on this card, GRAPHICS and MEMORY, and
@@ -3092,6 +3097,10 @@ class GPU:
     # candidate "valid" masks, moving nothing. The vendor's published
     # ctrl2080volt.h carries no commands or structs at all.
     #
+    # 0x5D0634EE being "only a getter" turned out to undersell it badly. What
+    # it gets is the absolute, live rail state - see read_volt_rail_state.
+    # Being uninteresting as a setter is not the same as being uninteresting.
+    #
     # "No export" is not "no write path", and conflating the two is what kept
     # this read-only for longer than it needed to be.
     def read_volt_rail_limits(self):
@@ -3099,8 +3108,13 @@ class GPU:
 
         Returns ``{rail_index: {"type", "reliability", "alt_reliability",
         "overvoltage", "vmin"}}`` with the four limits in millivolts, signed,
-        relative to the 1040 mV base described above. Rail 0 is NVVDD and
-        rail 1 is MSVDD.
+        each relative to its OWN base in VOLT_LIMIT_BASE_MV - which is not one
+        shared number: the ceilings sit at 1040 and 1060 and overvoltage at
+        1200. Rail 0 is NVVDD and rail 1 is MSVDD.
+
+        For absolute values, and for the live rail voltage, use
+        read_volt_rail_state instead. These deltas are what gets written; those
+        absolutes are what the card reports back independently.
         """
         a = self.nvapi
         if not (a.ok and a.VoltRailsCtlGet):
@@ -3124,6 +3138,85 @@ class GPU:
             }
         return out
 
+    # ---- the live rail block --------------------------------------------- #
+    # A DIFFERENT id and a different block from the limits above, and the
+    # distinction is the whole point of it. 0xA3070DB0 stores signed deltas, so
+    # reading it back returns what we wrote and proves storage, never effect.
+    # This one reports ABSOLUTE microvolts the card computed for itself, plus a
+    # LIVE per-rail voltage, so a write can finally be checked against a number
+    # we did not supply.
+    #
+    # LAYOUT, recovered by probing:
+    #   id 0x5D0634EE (RM 0x2080B213), version word 0x00010AC8 (v1, 2760 bytes)
+    #   dw1 is the INPUT rail mask, same convention as the limit block
+    #   records at byte 0x48, stride 0x54, all fields UNSIGNED ABSOLUTE uV:
+    #       +0x00 type   1 = NVVDD, 3 = MSVDD
+    #       +0x04 live voltage
+    #       +0x08 reliability      +0x0C alt_reliability
+    #       +0x10 overvoltage      +0x14 effective     +0x18 vmin
+    # A v2 also exists at 0x00021620 (5664 bytes, records 0xA0/0x14C stride
+    # 0xAC). v1 carries everything we use, so v1 is what we ask for.
+    #
+    # WHY THE LIVE FIELD IS A MEASUREMENT AND NOT A CONSTANT THAT LOOKS RIGHT:
+    # rail 0 tracked read_vcore_mv exactly across clock locks, 800000 ->
+    # 910000 uV, which is the positive control. Then each rail was clamped
+    # ALONE: clamping MSVDD moved only rail 1 (to 850.0, then 900.0) while
+    # rail 0 held at 910.0, and clamping NVVDD moved only rail 0 while rail 1
+    # held at 915.0. Two independent sensors, and at stock they disagree -
+    # 910.0 against 915.0 - so rail 1 is not rail 0 wearing another offset.
+    #
+    # What this does NOT establish is whether the number is ADC-sensed or the
+    # commanded setpoint. Both behave identically under a clamp, and no
+    # experiment here separates them, so callers should say "live" and not
+    # "measured at the rail".
+    #
+    # A NOTE ON THE OLD NEGATIVE. 0x2C73AFDC was written off as static
+    # description data because nothing in it moved under load. It was being
+    # called at v1 (0x00010ACC), which populates nothing but the version and a
+    # count; a v2 exists (0x0002184C, 6220 bytes) that does fill records. That
+    # conclusion was an artifact of the struct version, not a property of the
+    # card - which is why version discovery now runs before any such claim.
+    LIVE_RAIL_VER = 0x00010AC8
+    LIVE_RAIL_BASE = 0x48
+    LIVE_RAIL_STRIDE = 0x54
+    LIVE_RAIL_FIELDS = ("type", "live", "reliability", "alt_reliability",
+                        "overvoltage", "effective", "vmin")
+
+    def read_volt_rail_state(self):
+        """Per-rail live voltage and absolute limits, or ``None``.
+
+        Returns ``{rail: {"type", "live", "reliability", "alt_reliability",
+        "overvoltage", "effective", "vmin"}}`` in millivolts, ABSOLUTE. Unlike
+        read_volt_rail_limits these are not deltas and need no base applied.
+        """
+        a = self.nvapi
+        if not (a.ok and a.VoltRailsAbs):
+            return None
+        buf = (ctypes.c_ubyte * 8192)()
+        ctypes.memset(buf, 0, 8192)
+        pu = ctypes.cast(buf, ctypes.POINTER(u32))
+        pu[0], pu[1] = self.LIVE_RAIL_VER, 0x3     # version, then the rail mask
+        if a.VoltRailsAbs(a.gpu, ctypes.byref(buf)) != 0:
+            return None
+        out = {}
+        for rail in (0, 1):
+            base = (self.LIVE_RAIL_BASE + rail * self.LIVE_RAIL_STRIDE) // 4
+            rec = {}
+            for n, key in enumerate(self.LIVE_RAIL_FIELDS):
+                v = pu[base + n]
+                rec[key] = v if key == "type" else v / 1000.0
+            # An all-zero record means the mask selected a rail this card does
+            # not have. Reporting 0.0 mV as a live voltage would be worse than
+            # reporting nothing.
+            if rec["live"] or rec["reliability"]:
+                out[rail] = rec
+        return out or None
+
+    def read_rail_live_mv(self, rail):
+        """One rail's live voltage in millivolts, or ``None``."""
+        state = self.read_volt_rail_state()
+        return (state or {}).get(rail, {}).get("live")
+
     # The base every delta above is measured from. Not read from the card -
     # nothing exposes it - but pinned by the reconstruction in the comment on
     # read_volt_rail_limits, where four independent settings all resolved
@@ -3132,8 +3225,13 @@ class GPU:
     # 1060 base is pinned by measurement: a +93 delta held 1145 mV, which a
     # 1040 base cannot produce because it would cap at 1133, below the point
     # the card was observed holding.
+    # overvoltage is based at 1200, and that was WRONG here as 1040 until the
+    # absolute block above made it checkable. Requesting 1000 produced an
+    # absolute limit of 1160 mV, 900 -> 1060, 850 -> 1010: a flat +200 offset
+    # from what a 1040 base predicts, on both rails. The error was invisible
+    # for as long as the only readback was the delta we had just written.
     VOLT_LIMIT_BASE_MV = {"reliability": 1040.0, "alt_reliability": 1060.0,
-                          "overvoltage": 1040.0, "vmin": 800.0}
+                          "overvoltage": 1200.0, "vmin": 800.0}
 
     # THE TWO CEILINGS ARE NOT THE SAME KNOB, and treating them as one is a
     # real regression rather than a harmless simplification. Measured under
@@ -3353,17 +3451,27 @@ class GPU:
         clamped by alt_reliability. Reporting either field on its own is what
         made a 1153 mV write look applied while the card sat at 1060.
 
-        MEASURED ON RAIL 0 ONLY. Both bases and the boost interaction were
-        established against NVVDD; MSVDD's alt_reliability base has never been
-        pinned and its boost behaviour was never observed, so this is an
-        extrapolation there and callers should not quote it as a measurement.
+        OVERVOLTAGE IS A THIRD CLAMP, added once the absolute block made the
+        effective limit readable. The card's own "effective" field equals
+        min(reliability, alt_reliability, overvoltage): holding overvoltage at
+        1060 left the effective limit at 1040, and dropping it to 1010 pulled
+        the effective limit down to 1010 with both ceilings untouched. It sits
+        at 1200 mV from the factory on both rails, so it is inert until
+        somebody moves it - which is exactly why leaving it out of this
+        calculation went unnoticed.
+
+        MSVDD's bases are no longer an extrapolation. The absolute block
+        reports both rails directly, and its numbers reconcile: MSVDD's stock
+        990 mV reliability is the shared 1040 base plus the -50 mV delta the
+        card ships with, and its alt_reliability reads 1060 like NVVDD's.
 
         `fields` is one rail's dict of millivolt DELTAS, as
         read_volt_rail_limits returns it.
         """
         return min(cls.abs_limit_mv(fields, "reliability")
                    + cls.volt_boost_headroom_mv(),
-                   cls.abs_limit_mv(fields, "alt_reliability"))
+                   cls.abs_limit_mv(fields, "alt_reliability"),
+                   cls.abs_limit_mv(fields, "overvoltage"))
 
     @classmethod
     def rail_floor_mv(cls, fields):

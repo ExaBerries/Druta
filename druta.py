@@ -1265,15 +1265,24 @@ class Druta:
         ok, msg = self.gpu.set_volt_rail_limits(rail, **limits)
         self.log(msg, ok)
         if ok and rail == 1:
-            # Say it on every MSVDD write, not once in a tooltip. The write
-            # landing proves the register took the value and nothing more:
-            # this card exposes no MSVDD voltage anywhere, so there is no
-            # observation available that could confirm the rail moved.
-            self.log("MSVDD applies - measured at ~20 W of board power "
-                     "between 900 and 1200 mV. The limits themselves read "
-                     "back, so the value you set IS visible; what has no live "
-                     "reading on this card is the resulting rail voltage. "
-                     "Confirm an effect against board power.", False)
+            # Say it on every MSVDD write, not once in a tooltip - but say the
+            # CURRENT truth. This used to warn that no MSVDD voltage was
+            # exposed anywhere, which was the state of knowledge and is no
+            # longer the state of the card: the rail reports a live voltage
+            # that follows an MSVDD clamp while NVVDD's stays put. So the line
+            # now quotes what the rail actually did rather than telling the
+            # user to go and measure board power.
+            live = self.gpu.read_rail_live_mv(1)
+            if live:
+                self.log(f"MSVDD now reading {live:.0f} mV live. It also shows "
+                         f"up as board power - about 20 W between 900 and "
+                         f"1200 mV - which is the independent confirmation "
+                         f"the reading itself cannot provide.", ok)
+            else:
+                self.log("MSVDD applies - measured at ~20 W of board power "
+                         "between 900 and 1200 mV. No live rail reading is "
+                         "available on this card, so confirm an effect "
+                         "against board power.", False)
         self.refresh_volt_limits()
 
     def sync_vcap_to_ceiling(self, raw):
@@ -1321,7 +1330,7 @@ class Druta:
             # Stock beside an MSVDD knob silently discarded the NVVDD ceiling.
             rail = 1 if key.startswith("vlim1") else 0
             field = {"rel": "reliability", "alt": "alt_reliability",
-                     "lo": "vmin"}[key.rsplit("_", 1)[1]]
+                     "ov": "overvoltage", "lo": "vmin"}[key.rsplit("_", 1)[1]]
             ok, msg = self.gpu.reset_volt_rail_limits(rail=rail,
                                                       fields=(field,))
             self.log(msg, ok)
@@ -1352,24 +1361,33 @@ class Druta:
         raw = self.gpu.read_volt_rail_limits()
         if not raw:
             return
+        # The card's own absolute view, read fresh alongside the deltas. It is
+        # allowed to be None - it is a newer call than the limit block and a
+        # card that lacks it must still show its limits - so every use of it
+        # below falls back rather than assuming.
+        state = self.gpu.read_volt_rail_state()
         # Before the readout, so the cap and the ceiling can never be shown
         # disagreeing for a frame.
         self.sync_vcap_to_ceiling(raw)
         for r in (0, 1):
-            cells = self.volt_limits_cells(raw, r)
+            cells = self.volt_limits_cells(raw, r, state)
             if not cells:
                 continue
             if dpg.does_item_exist(f"vlim_txt{r}"):
                 dpg.set_value(f"vlim_txt{r}", cells[1])
             if dpg.does_item_exist(f"vlim_reach{r}"):
                 dpg.set_value(f"vlim_reach{r}", cells[2])
+            if dpg.does_item_exist(f"vlim_live{r}"):
+                dpg.set_value(f"vlim_live{r}", cells[3])
         # One knob per field, each showing its own value. The number they add
         # up to is in the readout line above, not folded into a slider.
         for key, field in (("vlim_rel", "reliability"),
                            ("vlim_alt", "alt_reliability"),
+                           ("vlim_ov", "overvoltage"),
                            ("vlim_lo", "vmin"),
                            ("vlim1_rel", "reliability"),
                            ("vlim1_alt", "alt_reliability"),
+                           ("vlim1_ov", "overvoltage"),
                            ("vlim1_lo", "vmin")):
             val = int(round(GPU.abs_limit_mv(
                 raw[1 if key.startswith("vlim1") else 0], field)))
@@ -1378,8 +1396,8 @@ class Druta:
                     dpg.set_value(pre + key, val)
 
     @staticmethod
-    def volt_limits_cells(raw, rail):
-        """One rail's limits as (label, fields, reach), for three table cells.
+    def volt_limits_cells(raw, rail, state=None):
+        """One rail's limits as (label, fields, cap, live), for four cells.
 
         Split across cells rather than joined into one string: a single line
         holding both rails overflowed the 230 px label column and was silently
@@ -1397,24 +1415,32 @@ class Druta:
             return None
         fields = (f"rel {GPU.abs_limit_mv(f, 'reliability'):.0f} / "
                   f"alt {GPU.abs_limit_mv(f, 'alt_reliability'):.0f} / "
+                  f"ov {GPU.abs_limit_mv(f, 'overvoltage'):.0f} / "
                   f"vmin {GPU.rail_floor_mv(f):.0f} mV")
-        # The reach is quoted only for the rail it was MEASURED on. Everything
-        # NVVDD's numbers rest on - both bases, and how the two ceilings
-        # combine - was pinned against vcore under load. MSVDD has no such
-        # anchor: nothing on this card reads that rail back, so its bases are
-        # inherited from NVVDD by assumption and its absolutes are only as good
-        # as that assumption. Saying "not measured" beside them is the whole
-        # difference between a reading and a guess wearing a unit.
-        # MSVDD's reliability and vmin bases ARE corroborated: asking for
-        # 950/750 reproduces the deltas the card was independently observed
-        # holding for those same limits. Its alt_reliability base is not, and
-        # no reading of the rail exists either way, so the effect of any of it
-        # stays unobservable from here. "no rail readback" is the
-        # honest summary: not that the numbers are guesses, but that nothing
-        # can confirm what they do.
-        reach = (f"-> {GPU.rail_ceiling_mv(f):.0f} mV" if rail == 0
-                 else "-> no rail readback")
-        return ("NVVDD" if rail == 0 else "MSVDD") + " limits", fields, reach
+        # The cap prefers the card's OWN effective limit over anything derived
+        # here. That is not a style choice: our ceiling is computed from bases
+        # this file assumes, so quoting it beside the fields it came from tells
+        # the user nothing they did not already give us. The card's number is
+        # arrived at independently, and when the two disagree the disagreement
+        # is the most useful thing on the panel.
+        #
+        # BOTH rails are quoted now. This used to say "no rail readback" for
+        # MSVDD because nothing on the card reported that rail, so its bases
+        # were inherited from NVVDD by assumption and its absolutes were only
+        # as good as that assumption. That caveat was honest when it was
+        # written and would be a lie now: each rail reports a live voltage, and
+        # they were proven independent by clamping one rail at a time and
+        # watching only that rail's number move.
+        s = (state or {}).get(rail) or {}
+        if s.get("effective"):
+            cap = f"cap {s['effective']:.0f} mV"
+        elif rail == 0:
+            cap = f"-> {GPU.rail_ceiling_mv(f):.0f} mV"
+        else:
+            cap = "-> no rail readback"
+        live = f"live {s['live']:.0f} mV" if s.get("live") else "live --"
+        return (("NVVDD" if rail == 0 else "MSVDD") + " limits",
+                fields, cap, live)
 
     def risk_features(self):
         """Which guardrail-removing features are actually live right now.
@@ -1474,8 +1500,8 @@ class Druta:
         # it cannot outlive the state that justified it. Nothing but Druta
         # bounds this value, so it must never be on by default.
         GPU.volt_limits_write_enabled = "volt_limits" in live
-        for k in ("vlim_rel", "vlim_alt", "vlim_lo",
-                  "vlim1_rel", "vlim1_alt", "vlim1_lo"):
+        for k in ("vlim_rel", "vlim_alt", "vlim_ov", "vlim_lo",
+                  "vlim1_rel", "vlim1_alt", "vlim1_ov", "vlim1_lo"):
             for pre in ("sl_", "in_", "go_"):
                 if dpg.does_item_exist(pre + k):
                     dpg.configure_item(pre + k,
@@ -1829,8 +1855,10 @@ class Druta:
                                 # a single joined line does not fit the 230 px label
                                 # column: it was being clipped mid-number, which on a
                                 # voltage readout is worse than showing nothing.
+                                lim_state = self.gpu.read_volt_rail_state()
                                 for _r in (0, 1):
-                                    cells = self.volt_limits_cells(lim, _r)
+                                    cells = self.volt_limits_cells(lim, _r,
+                                                                   lim_state)
                                     if not cells:
                                         continue
                                     with dpg.table_row():
@@ -1840,6 +1868,15 @@ class Druta:
                                                      wrap=self.s(self.KNOB_COLS[1]))
                                         dpg.add_text(cells[2], tag=f"vlim_reach{_r}",
                                                      color=DIM)
+                                        # The live rail voltage, in its own cell
+                                        # so it can refresh without redrawing
+                                        # the limits beside it. GOOD is the
+                                        # right colour even on the amber MSVDD
+                                        # row: this one is a reading, not a
+                                        # guardrail being moved.
+                                        dpg.add_text(cells[3],
+                                                     tag=f"vlim_live{_r}",
+                                                     color=GOOD)
                                 # EXPERIMENTAL, and gated on the Rail limits box. The
                                 # ceiling does not APPLY a voltage - it permits one, and
                                 # the arbiter then takes the highest V/F point at or
@@ -1886,19 +1923,53 @@ class Druta:
                                     int(round(GPU.abs_limit_mv(lim[0],
                                                                "reliability"))),
                                     lambda v: self.apply_vlim(0, reliability=v),
-                                    extra=("Stock", self.apply_vlim_reset))
+                                    extra=("Stock",
+                                           lambda _k="vlim_rel":
+                                           self.stock_knob(_k)))
                                 self.slider_row(
                                     "vlim_alt", "NVVDD alt-reliability (mV)",
                                     lo_mv, hi_mv,
                                     int(round(GPU.abs_limit_mv(lim[0],
                                                                "alt_reliability"))),
                                     lambda v: self.apply_vlim(0, alt_reliability=v),
-                                    extra=("Stock", self.apply_vlim_reset))
+                                    extra=("Stock",
+                                           lambda _k="vlim_alt":
+                                           self.stock_knob(_k)))
+                                # THE THIRD CLAMP, and normally the inert one.
+                                # The card enforces min(rel, alt, ov) - its own
+                                # effective field was watched doing exactly
+                                # that - but ov ships at 1200 mV on both rails,
+                                # far above either ceiling, so it changes
+                                # nothing until it is moved DOWN past them.
+                                # Exposed anyway for two reasons: it is the
+                                # only one of the three that can lower the cap
+                                # without touching a ceiling, and a tool that
+                                # leaves it moved would otherwise be invisible
+                                # here - which is the same failure that made a
+                                # foreign tool's 1.2 V ceiling look like ours.
+                                #
+                                # Its base is 1200, NOT the 1040 the ceilings
+                                # use. That was wrong in this codebase until
+                                # the card's own absolute readout made it
+                                # checkable; a knob built on the old base would
+                                # have been off by 160 mV in the dangerous
+                                # direction.
+                                self.slider_row(
+                                    "vlim_ov", "NVVDD overvoltage (mV)",
+                                    lo_mv, hi_mv,
+                                    int(round(GPU.abs_limit_mv(lim[0],
+                                                               "overvoltage"))),
+                                    lambda v: self.apply_vlim(0, overvoltage=v),
+                                    extra=("Stock",
+                                           lambda _k="vlim_ov":
+                                           self.stock_knob(_k)))
                                 self.slider_row(
                                     "vlim_lo", "NVVDD vmin (mV)", lo_mv, hi_mv,
                                     int(round(GPU.rail_floor_mv(lim[0]))),
                                     lambda v: self.apply_vlim(0, vmin=v),
-                                    extra=("Stock", self.apply_vlim_reset))
+                                    extra=("Stock",
+                                           lambda _k="vlim_lo":
+                                           self.stock_knob(_k)))
 
                                 # MSVDD APPLIES. Measured: clamping the ceiling 900
                                 # against 1200 mV moved board power by about 20 W,
@@ -1907,20 +1978,32 @@ class Druta:
                                 # clock and memory clock stayed put. So this reaches
                                 # hardware.
                                 #
-                                # What is missing is a LIVE RAIL READING, not a
-                                # readback - the limit registers read back
-                                # exactly, so the value set is visible; the
-                                # resulting VOLTAGE is not. A sweep across
-                                # seven volt-family structs, including a full version
-                                # sweep of the rails status call, moved exactly one
-                                # dword under load and it was NVVDD's. An earlier
-                                # label here said UNVERIFIED, which read as "probably
-                                # inert" - the opposite of the truth, and the more
-                                # dangerous way to be wrong.
+                                # THE LIVE READING NOW EXISTS. This block used to
+                                # say the resulting voltage was unobservable,
+                                # and that was true of every call tried at the
+                                # time - including a version sweep of the rails
+                                # status call, which moved exactly one dword
+                                # under load and it was NVVDD's.
+                                #
+                                # It was wrong for a reason worth keeping: that
+                                # status call was being asked at v1, which
+                                # populates nothing but a version and a count,
+                                # so an empty buffer was read as a card that
+                                # had nothing to say. A different id
+                                # (0x5D0634EE) reports both rails as absolute
+                                # microvolts with a live voltage each, and they
+                                # were proven independent by clamping one rail
+                                # at a time and watching only that rail move.
+                                #
+                                # So the caveat is now narrower, not gone: the
+                                # number is live, but nothing here establishes
+                                # whether it is sensed at the rail or the
+                                # commanded setpoint. Both would look like this.
                                 with dpg.table_row():
                                     dpg.add_text("MSVDD", color=WARN)
                                     dpg.add_text(
-                                        "APPLIES, NO REAL TIME READING",
+                                        "APPLIES, LIVE READING (setpoint or "
+                                        "sensed is unresolved)",
                                         color=WARN,
                                         wrap=self.s(self.KNOB_COLS[1]))
                                 self.slider_row(
@@ -1930,7 +2013,9 @@ class Druta:
                                                                "reliability"))),
                                     lambda v: self.apply_vlim(1, reliability=v),
                                     color=WARN,
-                                    extra=("Stock", self.apply_vlim_reset))
+                                    extra=("Stock",
+                                           lambda _k="vlim1_rel":
+                                           self.stock_knob(_k)))
                                 self.slider_row(
                                     "vlim1_alt", "MSVDD alt-reliability (mV)",
                                     lo_mv, hi_mv,
@@ -1938,13 +2023,27 @@ class Druta:
                                                                "alt_reliability"))),
                                     lambda v: self.apply_vlim(1, alt_reliability=v),
                                     color=WARN,
-                                    extra=("Stock", self.apply_vlim_reset))
+                                    extra=("Stock",
+                                           lambda _k="vlim1_alt":
+                                           self.stock_knob(_k)))
+                                self.slider_row(
+                                    "vlim1_ov", "MSVDD overvoltage (mV)",
+                                    lo_mv, hi_mv,
+                                    int(round(GPU.abs_limit_mv(lim[1],
+                                                               "overvoltage"))),
+                                    lambda v: self.apply_vlim(1, overvoltage=v),
+                                    color=WARN,
+                                    extra=("Stock",
+                                           lambda _k="vlim1_ov":
+                                           self.stock_knob(_k)))
                                 self.slider_row(
                                     "vlim1_lo", "MSVDD vmin (mV)", lo_mv, hi_mv,
                                     int(round(GPU.rail_floor_mv(lim[1]))),
                                     lambda v: self.apply_vlim(1, vmin=v),
                                     color=WARN,
-                                    extra=("Stock", self.apply_vlim_reset))
+                                    extra=("Stock",
+                                           lambda _k="vlim1_lo":
+                                           self.stock_knob(_k)))
 
                             # A SECOND mechanism on the same rail as the boost above,
                             # and the note says so: they are different calls, neither
