@@ -3307,7 +3307,13 @@ class Druta:
         # coordinate answers "where is my mouse", which is not the question
         # being asked while editing; vf_corner below answers "what am I
         # editing" in the same corner.
-        with dpg.plot(tag="vf_plot", height=self.s(380), width=-1,
+        # height=-1 fills whatever vertical space is left rather than taking a
+        # fixed 380 px. A fixed height at the BOTTOM of a panel that grows is
+        # always at the mercy of what is above it: as rows were added the plot
+        # ran off the window and the x-axis - the labels that say which
+        # voltage a dot sits at - stopped being drawn at all. Filling the
+        # remainder keeps the axis on screen at any window size.
+        with dpg.plot(tag="vf_plot", height=-1, width=-1,
                       no_mouse_pos=True,
                       pan_button=dpg.mvMouseButton_Left):
             dpg.add_plot_legend()
@@ -7777,7 +7783,12 @@ deliberately does not put behind a button."""
         # display so a screen smaller than this 4K one still gets a window that
         # fits on it (dpi_scale() has already declared DPI awareness, so
         # GetSystemMetrics reports physical pixels).
-        vh = self.s(1120)
+        # 1120 -> 1300: the V/F editor gained the plan banner and the editing
+        # controls above the plot, and the plot now takes whatever height is
+        # left. At the old default there was so little left that the x-axis -
+        # the labels naming the voltage each dot sits at - fell off the bottom.
+        # The clamp below still applies, so a smaller display is unaffected.
+        vh = self.s(1300)
         try:
             screen_h = ctypes.windll.user32.GetSystemMetrics(1)  # SM_CYSCREEN
         except Exception:
