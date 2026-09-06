@@ -19,7 +19,7 @@
 """
 Druta - GPU backend (NVAPI + NVML), read + guarded write.
 
-Built for the Titan RTX (TU102, DEV_1E02) on the ASUS 2080 Ti Strix PCB, but
+Built for the Titan RTX (TU102, DEV_1E02) on a 2080 Ti PCB, but
 falls back to GPU index 0 for any NVIDIA card. All struct layouts are lifted
 verbatim from the read-only probes verified live on this card (driver 591.44):
 NVAPI ids and NVML field numbers were confirmed against the hardware, not guessed.
@@ -3049,8 +3049,8 @@ class GPU:
         return None
 
     # ---- per-rail voltage limits ----------------------------------------- #
-    # The rail limit block. Read-only, and the read-only part is a finding
-    # rather than a design choice - see the end of this comment.
+    # The rail limit block. Readable here; written by set_volt_rail_limits,
+    # which does NOT go through NvAPI - see the end of this comment for why.
     #
     # LAYOUT, established here by probing, not from any third-party header:
     #   id 0xA3070DB0, version word 0x00020AC8 (v2, 2760 bytes)
@@ -3060,12 +3060,12 @@ class GPU:
     #     +0x0C overvoltage  +0x10 vmin
     #
     # The four limits are SIGNED MICROVOLT DELTAS from a fixed 1040 mV base,
-    # not absolute ceilings. That was confirmed by reconstruction: with an
-    # external tool holding NVVDD 900/1150 and MSVDD 750/950, this block read
-    # NVVDD reliability +110 / vmin +100 and MSVDD reliability -90 / vmin -50,
-    # and 1040+110, 800+100, 1040-90, 800-50 give back all four numbers
-    # exactly. NVVDD alt_reliability read +90 => 1060, which is precisely the
-    # ceiling measured on this card before the id was known.
+    # not absolute ceilings. Confirmed by reconstruction: with the card held at
+    # NVVDD 900/1150 and MSVDD 750/950, this block read NVVDD reliability +110
+    # / vmin +100 and MSVDD reliability -90 / vmin -50, and 1040+110, 800+100,
+    # 1040-90, 800-50 give back all four numbers exactly. NVVDD
+    # alt_reliability read +90 => 1060, precisely the ceiling measured on this
+    # card before the id was known.
     #
     # THE FACTORY STATE IS NOT ALL ZERO. On this GB203 the card powers up with
     # NVVDD at 0 and MSVDD reliability at -50000, i.e. NVVDD capped at the full
@@ -3078,20 +3078,22 @@ class GPU:
     # display-stack reset (Win+Ctrl+Shift+B). A PnP restart of the adapter
     # returns it to the factory values above.
     #
-    # THERE IS NO SETTER, and this was searched exhaustively rather than
-    # assumed. The rails RM commands GET_CONTROL/SET_CONTROL (0x2080B203 and
-    # 0x2080B204) do not occur anywhere in nvapi64.dll as immediates. The
-    # modern unified command 0x2080F214 has exactly three owning exports -
-    # 0x9C4BB8D0 (info), 0x2C73AFDC (status) and 0xA3070DB0 (this one) - and
-    # every one of them reads. 0x5D0634EE, which sits between them in the id
-    # table and accepts the same 2760-byte struct, also returns data when
-    # called, so it is a fourth getter and not the setter its position
-    # suggests. Writes through it are accepted and applied nowhere: a full
+    # NO NVAPI EXPORT WRITES THIS BLOCK, and that was searched exhaustively
+    # rather than assumed - which is why set_volt_rail_limits goes to RM
+    # directly instead. The rails RM commands GET_CONTROL/SET_CONTROL
+    # (0x2080B203 and 0x2080B204) do not occur anywhere in nvapi64.dll as
+    # immediates. The unified command 0x2080F214 has exactly three owning
+    # exports - 0x9C4BB8D0 (info), 0x2C73AFDC (status) and 0xA3070DB0 (this
+    # one) - and every one of them reads. 0x5D0634EE, which sits between them
+    # in the id table and accepts the same 2760-byte struct, also returns data
+    # when called, so it is a fourth getter and not the setter its position
+    # suggests: writes through it are accepted and applied nowhere, with a full
     # sweep of the header dwords and of every unused dword in a record, as
-    # candidate "valid" masks, moved nothing. NVIDIA's own published
-    # ctrl2080volt.h carries no commands or structs at all, so there is no
-    # first-party route either. Anything that does write these limits is
-    # therefore building an RM control call by hand against the kernel driver.
+    # candidate "valid" masks, moving nothing. The vendor's published
+    # ctrl2080volt.h carries no commands or structs at all.
+    #
+    # "No export" is not "no write path", and conflating the two is what kept
+    # this read-only for longer than it needed to be.
     def read_volt_rail_limits(self):
         """Per-rail voltage limits as millivolt deltas, or ``None``.
 
@@ -3150,8 +3152,8 @@ class GPU:
     # so reliability is the base the voltage-boost slider climbs FROM, and
     # alt_reliability is a hard clamp over the result. Row 2 is why writing
     # reliability alone does nothing, and row 4 is why writing BOTH to the
-    # requested ceiling - which is what an external tool leaves behind - makes
-    # the boost slider inert: 0% and 100% both land on the same volt.
+    # requested ceiling makes the boost slider inert: 0% and 100% then land on
+    # the same volt.
     #
     # The headroom is the VBIOS over-voltage allowance and is exactly the gap
     # between the two bases, so it is derived rather than hardcoded.
@@ -3367,23 +3369,46 @@ class GPU:
     def rail_floor_mv(cls, fields):
         return cls.abs_limit_mv(fields, "vmin")
 
-    def reset_volt_rail_limits(self):
-        """Put both rails back to this card's power-on limits.
+    # This card's power-on deltas, in microvolts, in VOLT_LIMIT_FIELDS order.
+    # NOT all zero: MSVDD ships 50 mV below NVVDD, so zeroing both would RAISE
+    # the MSVDD ceiling rather than restore it.
+    VOLT_LIMIT_POWERON = {0: (0, 0, 0, 0), 1: (-50000, 0, 0, 0)}
 
-        NOT all zero: this card ships MSVDD 50 mV below NVVDD, so zeroing both
-        would RAISE the MSVDD ceiling rather than restore it.
+    def reset_volt_rail_limits(self, rail=None, fields=None):
+        """Put limits back to this card's power-on values.
+
+        `rail` None means both; `fields` None means all four. Both are narrowed
+        rather than assumed, because a per-knob Stock button that resets the
+        whole block silently discards settings on the OTHER rail - which is
+        exactly what it did before this took arguments.
 
         Deliberately NOT gated on volt_limits_write_enabled. That gate exists to
-        stop a slider raising a ceiling by itself; this call only ever lowers
-        one back to the power-on value. Refusing it because "writes are
-        disabled" would strand a card on limits the user is trying to clear -
-        which is the exact stickiness that made this feature necessary.
+        stop a slider raising a ceiling by itself; this call only ever returns
+        one to the power-on value. Refusing it because "writes are disabled"
+        would strand a card on limits the user is trying to clear - the exact
+        stickiness that made this feature necessary.
         """
-        ok, status = self._write_rail_records(
-            {0: [0, 0, 0, 0], 1: [-50000, 0, 0, 0]})
+        cur = self.read_volt_rail_limits()
+        if cur is None:
+            return False, "cannot read the current limits"
+        rails = (0, 1) if rail is None else (int(rail),)
+        keys = tuple(fields) if fields else self.VOLT_LIMIT_FIELDS
+        bad = set(keys) - set(self.VOLT_LIMIT_FIELDS)
+        if bad:
+            return False, f"not a rail limit: {', '.join(sorted(bad))}"
+        recs = {r: [int(round(cur[r][k] * 1000))
+                    for k in self.VOLT_LIMIT_FIELDS] for r in (0, 1)}
+        for r in rails:
+            for k in keys:
+                i = self.VOLT_LIMIT_FIELDS.index(k)
+                recs[r][i] = self.VOLT_LIMIT_POWERON[r][i]
+        ok, status = self._write_rail_records(recs)
         if not ok or status:
             return False, f"reset refused (NV_STATUS 0x{status or 0:X})"
-        return True, "rail limits back to the power-on values"
+        what = ("rail limits" if rail is None and not fields
+                else f"{_RAIL_NAME[rails[0]]} "
+                     + (", ".join(keys) if fields else "limits"))
+        return True, f"{what} back to the power-on values"
 
     def volt_rail_limits_mv(self):
         """The same limits resolved to absolute millivolts, or ``None``."""
