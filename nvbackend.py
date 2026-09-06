@@ -4118,38 +4118,41 @@ class GPU:
         imperfect power-limit bypass (shunt mods, where the GPU's own
         current-sensing heuristics still throttle).
 
-        ANCHOR AT THE TOP AND DESCEND. The cap point takes the highest allowed
-        frequency and every point below it is exactly one 15 MHz bin lower, down
-        to the floor. The alternative - ascend from the floor - CLIPS: from
-        800 mV the unclipped top is 2250 MHz against this card's 2130 max, so the
-        top eight points get clipped onto 2130 and a nine-point flat run reappears
-        exactly where it hurts most. Descending cannot clip, by construction.
+        NEVER BELOW STOCK. Each rung is max(its own stock frequency, one grid
+        step above the rung beneath it), walked upward through the band. Where
+        stock is steeper than the grid the rung simply IS stock and the plan
+        costs nothing; the grid step only does work across flat runs, which is
+        the thing a ramp exists to break up.
 
-        The ceiling itself is min(max_khz, the unclipped ascending top), which is
-        what keeps a low cap honest: anchoring unconditionally at the hardware
-        max would demand 2130 MHz at whatever voltage the cap happens to name.
+        This replaced a uniform descent - every rung one bin below the one above
+        it, anchored at khz[floor] + (rungs-1)*grid - which fixed the slope at
+        one step per point no matter what stock did. Anywhere stock climbed
+        faster, the ramp fell behind and never caught up: a 33-rung band from
+        1004 mV on the 7.5 MHz grid topped out at 2932 MHz where stock already
+        held 3157. A 225 MHz demotion, from a feature whose whole purpose is to
+        ask for more clock.
 
-        WHAT IT COSTS. For the regular band the price is zero: descending 15
-        rungs from 2130 lands on exactly 1905 at 1000.00 mV, which is what stock
-        already has there. For a 48-point band from 800 mV the clip costs 120 MHz
-        at the floor (1425 against stock's 1545) - that is the honest price of
-        monotonicity over a wide span, so meta carries it and every caller
-        reports it rather than hiding it.
+        WHAT IT COSTS. Nothing, at any rung, by construction - no point is ever
+        planned below the frequency it already holds. floor_cost_mhz is retained
+        in meta and is now always zero; callers that reported it keep working.
+        The price moved to the other side of the ledger: every rung that IS
+        lifted asks for more clock at its voltage than stock did, so the
+        granularity fix and the overclock remain one edit and each rung still
+        has to be stable in its own right.
 
         AND WHAT THE DRIVER THEN DOES TO IT. The delta table takes the plan
         verbatim; the evaluated curve does not (VF_MAX_RISE_KHZ,
-        evaluate_curve_law). A clipped floor lands below the untouched point
-        under the band and the driver raises those rungs onto it - measured, the
-        800 mV band's bottom eight rungs all come back as the 1530 MHz of the
-        point below, one flat run where eight operating points were planned. So
-        meta reports `delivered`, the number of DISTINCT operating points the
-        band will really have, next to `rungs`, the number that were asked for;
-        the first is the number this feature is actually judged on. A band can
-        never deliver more than (top - the point below it)/15 + 1 rungs, however
-        many points it spans. `lifted_below` is the other half of the same law:
-        a floor placed more than 45 MHz above the point beneath it drags that
-        point up, so "nothing below the floor is touched" is a promise about the
-        delta table and this is the promise about the rail.
+        evaluate_curve_law), so meta still reports `delivered`, the number of
+        DISTINCT operating points the band will really have, beside `rungs`, the
+        number asked for. The first is what this feature is judged on.
+
+        The clipped-floor pathology that used to dominate this paragraph is
+        gone with the descent that caused it: the bottom rung is now stock[L]
+        exactly, so it cannot land under the untouched point beneath the band
+        and cannot be raised back onto it as one flat. `lifted_below` is kept
+        because the law still applies in general - a floor more than 45 MHz
+        above the point beneath drags it up - but a floor that equals stock
+        cannot open a gap stock did not already have.
 
         Points BELOW lo_mv are left untouched, for the reason compute_deflatten
         gives: the low-voltage floor is many points pinned at the minimum clock,
@@ -4187,58 +4190,57 @@ class GPU:
             return [], 0.0, 0.0, meta
         L, B = band[0], band[-1]
         rungs = len(band)
-        # the ascending top is what the band would reach if the floor kept its
-        # current frequency and every point above it gained one bin
-        asc_top = khz[L] + (rungs - 1) * grid
-        top = asc_top
-        if max_khz is not None and top > max_khz:
-            top, meta["clamped"] = int(max_khz), True
 
-        # SHRINK THE BAND TO WHAT THE HEADROOM ACTUALLY ALLOWS.
+        # A RUNG IS NEVER PLACED BELOW ITS OWN STOCK FREQUENCY.
         #
-        # A clipped ramp keeps its rung count and slides the whole descent down,
-        # which puts the bottom rungs UNDER the untouched point below the band -
-        # and the shape law's non-decreasing pass then raises them all back onto
-        # that point as ONE FLAT. That is the exact pathology a ramp exists to
-        # remove, so emitting a plan that causes it is worse than emitting a
-        # smaller plan. Measured on GP102: a 10-rung band from 1000 mV clipped
-        # at gfx_max delivered 8 distinct frequencies, with idx 55/56/57 all
-        # collapsed onto the neighbour's 1822.5.
+        #     new[i] = max(stock[i], new[i-1] + grid)
         #
-        # So drop rungs from the BOTTOM until the floor clears the point below
-        # it. The dropped points keep their stock values, which are already
-        # increasing - leaving them alone beats flattening them. Shrinking from
-        # the bottom rather than the top because the top is the end that is
-        # pinned: the cap point has to stay the highest, or the arbiter parks
-        # somewhere else entirely.
-        dropped = 0
-        while len(band) > 1:
-            below_band = [i for i in range(n)
-                          if points[i]["volt_mv"] < points[band[0]]["volt_mv"] - 0.01]
-            if not below_band:
-                break
-            un = max(below_band, key=lambda i: points[i]["volt_mv"])
-            if top - (len(band) - 1) * grid >= khz[un]:
-                break
-            band = band[1:]
-            dropped += 1
-        if dropped:
-            L, rungs = band[0], len(band)
-            meta["dropped_rungs"] = dropped
-            meta["dropped_reason"] = (
-                "the band's lower rungs had no headroom: their targets landed "
-                "under the untouched point below the band, where the shape law "
-                "would have raised them all onto it as one flat")
+        # walked upward through the band. Strictly increasing by construction,
+        # and by the same construction incapable of demoting a point.
+        #
+        # The previous shape was a UNIFORM descent from an anchor: every rung
+        # exactly one grid step below the one above it, with the top pinned at
+        # khz[floor] + (rungs-1)*grid. That fixed the ramp's slope at one step
+        # per point regardless of what stock did, so anywhere stock climbed
+        # faster than the grid the ramp fell behind it and stayed behind. On
+        # this card's curve, a 33-rung band from 1004 mV on the 7.5 MHz grid
+        # topped out at 2932 MHz where stock already held 3157 - a 225 MHz
+        # DEMOTION issued by a feature whose entire purpose is to ask for more
+        # clock. The flat top was removed and the whole band went backwards.
+        #
+        # Following stock wherever stock is steeper fixes it: in those regions
+        # the rung IS the stock value and the plan costs nothing, and the grid
+        # step only does work where stock is flat - which is precisely the
+        # region a ramp exists to break up.
+        #
+        # THE DRIVER'S MAX RISE IS SATISFIED WITHOUT CHECKING IT. A step is
+        # either grid (trivially under the limit) or stock[i] - new[i-1], and
+        # since new[i-1] >= stock[i-1] that is at most stock[i] - stock[i-1],
+        # a gap the stock curve already carries and the driver already accepts.
+        #
+        # It also retires the whole clipped-floor problem. The bottom rung is
+        # stock[L] exactly, so it can no longer land under the untouched point
+        # beneath the band, which is what used to make the shape law raise the
+        # lower rungs back onto that point as one flat. The band no longer has
+        # to be shrunk from the bottom to avoid it, and the floor costs zero.
+        plan = {}
+        prev = None
+        for i in band:
+            want = khz[i] if prev is None else max(khz[i], prev + grid)
+            if max_khz is not None and want > max_khz:
+                want, meta["clamped"] = int(max_khz), True
+            plan[i] = want
+            prev = want
+        top = plan[B]
 
         new = {}
-        for step, i in enumerate(band):
-            want = top - (rungs - 1 - step) * grid
-            if khz[i] != want:
-                new[i] = want
+        for i in band:
+            if khz[i] != plan[i]:
+                new[i] = plan[i]
         for i in above:                    # flat top; park = the cap point
             if khz[i] != top:
                 new[i] = top
-        floor_after = top - (rungs - 1) * grid
+        floor_after = plan[L]
         # The point immediately UNDER the band keeps whatever it had, so a
         # clipped ramp can land its floor below its own neighbour. On paper that
         # is a step down at the band edge; in hardware it never becomes one,
