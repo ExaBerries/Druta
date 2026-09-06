@@ -917,7 +917,18 @@ assert CLKDOM_HDR + CLKDOM_SLOTS * CLKDOM_STRIDE == CLKDOM_SIZE
 # private getter's domain numbering.  The XBAR/SYSCLK names are retained from
 # the documented control layout, while VIDEO was re-identified on RTX 5080
 # +610.88 by a repeatable physical VIDEO response at control 4.
-CLKDOM_BLACKWELL_CONTROLS = {1: "XBAR", 3: "SYSCLK", 4: "VIDEO"}
+# Control 2 is MEM, and it is here because it was MEASURED, not because
+# the name lines up. On RTX 5080 / 580.97 a +100 request moved the memory
+# clock 15001 -> 15101 and +300 moved it to 15301, exactly 1:1, restoring
+# to 15001 on zero. That matters more than usual for this one: it is the
+# only route to a memory offset that is not checked against the VBIOS
+# delta range. It is NOT, however, a way past that range: measured with NVML
+# at zero, this delta moves the memory clock 1:1 up to exactly +3000 MHz
+# effective and then stops - +3500 and +4500 store their full value and leave
+# the clock at 18001, the same 18001 the declared maximum reaches. The clamp
+# lives downstream of every path we have. Unvalidated is not the same as
+# unbounded, and this block is the former.
+CLKDOM_BLACKWELL_CONTROLS = {1: "XBAR", 2: "MEM", 3: "SYSCLK", 4: "VIDEO"}
 # Keep the logical-to-wire signs explicit for each Blackwell control. The
 # follow-up end-to-end RTX 5080 test showed that XBAR must be written with the
 # same sign selected in the UI. The earlier raw-probe direction was one layer
@@ -1947,6 +1958,110 @@ class GPU:
     # the evidence. Deliberately a class attribute and not a UI checkbox
     # default, so it cannot be flipped by a stray click.
     msvdd_write_enabled = False
+
+    # NVML's own architecture enum. Kepler 2, Maxwell 3, Pascal 4, Volta 5,
+    # Turing 6, Ampere 7, Ada 8, Hopper 9, Blackwell 10.
+    ARCH_PASCAL = 4
+    ARCH_TURING = 6
+    ARCH_NAMES = {2: "Kepler", 3: "Maxwell", 4: "Pascal", 5: "Volta",
+                  6: "Turing", 7: "Ampere", 8: "Ada", 9: "Hopper",
+                  10: "Blackwell"}
+
+    def arch(self):
+        """This card's architecture as NVML's enum, or ``None``."""
+        nv = self.nvml
+        if not (nv.ok and nv.has("nvmlDeviceGetArchitecture")):
+            return None
+        a = u32(0)
+        if nv.dll.nvmlDeviceGetArchitecture(nv.dev, ctypes.byref(a)) != 0:
+            return None
+        return a.value
+
+    def arch_name(self):
+        return self.ARCH_NAMES.get(self.arch() or -1)
+
+    # WHAT WAS ACTUALLY MEASURED, per (architecture, control domain). Absent
+    # means nobody has looked, and absent must not be read as either answer.
+    #
+    #   Pascal / MEM   GP102, Titan Xp. APPLIES, and it is the only path found
+    #                  anywhere that goes PAST the declared ceiling: with the
+    #                  ordinary memory slider already maxed at its declared
+    #                  +250 real (GPU-Z 1426 -> 1676), the per-domain delta
+    #                  carried the clock beyond 1676 to 1700+. That is the
+    #                  behaviour this knob was built hoping to find, and it
+    #                  exists on the OLD card and not the new one.
+    #   Pascal / XBAR  GP102. Stored and ignored - the original measurement,
+    #                  and the one that was wrongly generalised to every domain.
+    #   Turing / MEM   TU102, Titan RTX. APPLIES, but NOT 1:1 and not on any
+    #                  ratio yet identified: a +100 request moved the clock to
+    #                  1772.7 and +750 landed at 1937, which two points do not
+    #                  fit one straight line. Recorded as measured rather than
+    #                  modelled. Whether it can pass the declared ceiling is
+    #                  UNTESTABLE on that card - its memory gives out around
+    #                  2150-2200, below the 2500 the ceiling allows, so the
+    #                  silicon runs out before the limit does.
+    #   Blackwell/MEM  GB203. APPLIES 1:1 and is CLAMPED at exactly the
+    #                  declared maximum: +3000 reaches it, +3500 and +4500
+    #                  store in full and move nothing further.
+    #
+    # So the generations disagree, and the disagreement is the finding: the
+    # declared range is enforced downstream on Blackwell and is not on Pascal.
+    CLKDOM_DELTA_APPLIES = {
+        (ARCH_PASCAL, 2): True,
+        (ARCH_PASCAL, 1): False,
+        (ARCH_TURING, 2): True,
+        (10, 2): True,
+    }
+
+    # Where the delta is known to reach past the range the card declares.
+    CLKDOM_DELTA_CLEARS_CEILING = {
+        (ARCH_PASCAL, 2): True,
+        (10, 2): False,
+    }
+
+    def clkdom_delta_inert(self, domain=None):
+        """Is a per-domain frequency delta STORED AND IGNORED on this card?
+
+        True where the route is known not to work, False where it is known to
+        work, None where we do not know - and the three are different answers,
+        so callers must not collapse None into either.
+
+        The per-domain frequency delta is consumed by PMU microcode, not by
+        anything on the host, and only from clk 3.5 onward. That was settled
+        the expensive way in this project: on GP102 the delta is stored exactly
+        as it is on TU102 - so a read-back proves nothing at all here - and the
+        card never acts on it. Storage is not the discriminator; the generation
+        is. Anything older than Turing gets the warning, because a knob that
+        silently does nothing is worse than one that says it cannot.
+
+        SCOPE, and it is narrower than the sentence above wants to be. What
+        was measured on GP102 was the XBAR domain. MEM was never tried there,
+        and there is a live reason to doubt the generalisation: the declared
+        OC range is read-only - it lives in an INFO payload (NvAPI 0x57B5A5DF
+        version 0x000486AC, entry 0xAC + domain*0x430, s16 min at +0x40 and max
+        at +0x42) and no entry point accepts that geometry for writing - so the
+        unchecked CONTROL delta was believed to be a route PAST that range.
+        It is not. Measured on Blackwell with NVML at zero, the delta tracks
+        the memory clock 1:1 to exactly +3000 MHz effective and then stops;
+        +3500 and +4500 store in full and move nothing. So no path this project
+        has found exceeds the declared range on this generation.
+
+        That leaves the Pascal question genuinely open rather than answered.
+        This returns per-CARD, not per-domain, so on an older card the MEM knob
+        is reporting what was measured elsewhere - on XBAR, on GP102. Treat a
+        Pascal MEM result as unknown until somebody moves that clock and
+        watches it happen.
+        """
+        a = self.arch()
+        if a is None:
+            return None
+        if domain is not None and (a, domain) in self.CLKDOM_DELTA_APPLIES:
+            return not self.CLKDOM_DELTA_APPLIES[(a, domain)]
+        return a < self.ARCH_TURING
+
+    def clkdom_delta_clears_ceiling(self, domain):
+        """Does this delta reach past the card's DECLARED range? Tri-state."""
+        return self.CLKDOM_DELTA_CLEARS_CEILING.get((self.arch(), domain))
 
     def clkdom_is_blackwell(self):
         """Whether this is an RTX 50-series card.

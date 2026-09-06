@@ -184,7 +184,8 @@ VIOLET = (160, 108, 255)
 # One per-domain offset knob. `ctrl` indexes the CONTROL BLOCK, `priv` the
 # private clock getter - two different numberings for the same clock, and the
 # pair is measured, not assumed (see App.DOMAIN_KNOBS).
-DomainKnob = namedtuple("DomainKnob", "key ctrl fallback note")
+DomainKnob = namedtuple("DomainKnob", "key ctrl fallback note xoc_only",
+                        defaults=(False,))
 
 # What one knob is allowed to ask for, normally and under XOC. Named rather
 # than a bare 5-tuple for the same reason DomainKnob is (see App.DOMAIN_KNOBS):
@@ -1215,6 +1216,28 @@ class Druta:
         # sits: +45 has been measured landing as +30 in one state and +45 in
         # another. Watch the live value.
         DomainKnob("ltc", 9, "control domain 9", None),
+        # MEM. It was added believing it escaped the declared range. It does
+        # not - see below - and it is kept as a SECOND ROUTE to the same
+        # envelope, which is worth having only because it is the route whose
+        # behaviour on other generations is still unmeasured.
+        #
+        # The ordinary memory slider is checked against the card's declared
+        # delta range, and that range is the VBIOS's: nvmlDeviceGetClockOffsets
+        # and NVAPI Pstates20 report the SAME numbers on this card, -1000..+3000
+        # MHz effective, because both are reading the same table. So a card
+        # whose ICs can climb past what its VBIOS declares is held back by the
+        # declaration, not by the silicon, and no swap of usermode API changes
+        # that.
+        #
+        # This route does not consult that range at all -
+        # set_clk_domain_offset writes a raw signed kHz field with no check of
+        # any kind - which is exactly why it is XOC-only and why its upper
+        # bound below is Druta's own invention rather than a measured fact.
+        # The fallback name matters more here than for the others: this
+        # is the one knob that appears on cards with no measured
+        # pairing, where the fallback IS the label. "control domain 2"
+        # would tell a user nothing about what they are moving.
+        DomainKnob("memdom", 2, "MEM requested", None, True),
     )
 
     def domain_knob_label(self, kn, rows=None):
@@ -1559,6 +1582,21 @@ class Druta:
             if dpg.does_item_exist(tag):
                 dpg.configure_item(tag, enabled="volt_limits" in live)
 
+        # XOC-GATED, not merely XOC-widened. Every other per-domain knob stays
+        # usable without XOC because its range is the one the driver admits
+        # anywhere on this card. The memory one is different in kind: the whole
+        # reason it exists is that its write is checked against nothing, so
+        # leaving it live with the box unticked would hand out the escape while
+        # the banner still described the guardrails as being in place.
+        #
+        # Its Stock button stays enabled for the same reason the rail ones do -
+        # putting a clock back is the action you want available exactly when
+        # you have just taken the permission away.
+        for k in (kn.key for kn in self.DOMAIN_KNOBS if kn.xoc_only):
+            for pre in ("sl_", "in_", "go_"):
+                if dpg.does_item_exist(pre + k):
+                    dpg.configure_item(pre + k, enabled="xoc" in live)
+
         # AHEAD of the RISK_STOCK return below, not after the banner work: this
         # is the call that puts the knobs BACK when XOC is unticked, and behind
         # the return it would run on every state except the one that needs it.
@@ -1813,9 +1851,39 @@ class Druta:
                                     cur = cur or {}
                                     # via read(), not read_clock_domains(): the bare call
                                     # names blind and would report every card as Turing
-                                    drows = (self.gpu.read() or {}).get("clk_domains")
+                                    _live = self.gpu.read() or {}
+                                    drows = _live.get("clk_domains")
                                     controls = set(self.gpu.clkdom_controls_for_ui(drows))
+                                    # The declared envelope, in the same
+                                    # effective-MHz units this knob writes: the
+                                    # per-domain delta measured 1:1 against the
+                                    # memory clock (+100 -> +100 MHz eff), so
+                                    # no second scale applies to it.
+                                    mem_lo, mem_hi = -1000, 3000
+                                    if st.get("mem_off_range"):
+                                        mem_lo = int(st["mem_off_range"][0] / mscale)
+                                        mem_hi = int(st["mem_off_range"][1] / mscale)
+                                    # Typo catcher, at a quarter of the memory
+                                    # clock. The first version of this used the
+                                    # WHOLE clock, which catches nothing worth
+                                    # catching: a slipped digit - 5000 for 500 -
+                                    # sails through a bound that permits
+                                    # doubling the memory speed. A quarter is
+                                    # far above any real memory overclock and
+                                    # still refuses an extra zero.
+                                    #
+                                    # Never narrower than what the card itself
+                                    # declares, so ticking XOC can only ever
+                                    # widen this knob, and floored so a card
+                                    # with a tiny declared range still gets the
+                                    # headroom that is the entire point here.
+                                    mem_typo = max(abs(mem_hi),
+                                                   int((_live.get("mem_p0max")
+                                                        or _live.get("mem")
+                                                        or 0) * 0.25),
+                                                   1000)
                                     built = 0
+                                    unverified = []
                                     for kn in self.DOMAIN_KNOBS:
                                         if kn.ctrl not in self.gpu.clkdom_domains():
                                             continue
@@ -1826,9 +1894,30 @@ class Druta:
                                         # are separate, so its accepted controls are
                                         # gated by the architecture-specific layout and
                                         # validated one-hot control mask above.
-                                        if kn.ctrl not in controls:
+                                        # An xoc_only knob is let through
+                                        # WITHOUT a measured pairing. That is a
+                                        # deliberate exception to the rule
+                                        # above, and it is narrow: the declared
+                                        # OC range is read-only, so an unchecked
+                                        # CONTROL delta is the only route past
+                                        # it on any generation, and refusing to
+                                        # show the knob on the cards that most
+                                        # need it guarantees nobody ever finds
+                                        # out whether it works there. It is
+                                        # XOC-gated and carries the note below.
+                                        paired = kn.ctrl in controls
+                                        if not paired and not kn.xoc_only:
                                             continue
-                                        built += 1
+                                        # Only a PAIRED knob counts as mapped.
+                                        # Otherwise showing the unverified one
+                                        # would suppress the "nothing is mapped
+                                        # for this card" message below, which is
+                                        # the honest thing to say about every
+                                        # other domain.
+                                        if paired:
+                                            built += 1
+                                        else:
+                                            unverified.append(kn)
                                         init = int(cur.get(kn.ctrl, {})
                                                    .get("freq_khz", 0) / 1000)
                                         lbl, col, _p = self.domain_knob_label(kn, drows)
@@ -1852,14 +1941,100 @@ class Druta:
                                         # request from +25 to +300 MHz, which is bin
                                         # flooring rather than a ratio. Kept as a comment
                                         # because per-slider subtext is no longer drawn.
+                                        # MEM is bounded differently from the
+                                        # rest. Not because it escapes a bound -
+                                        # measured, it does not - but because
+                                        # its own write is unvalidated, so the
+                                        # only bound between the slider and the
+                                        # driver is this one.
+                                        #
+                                        # Without XOC it gets the card's OWN
+                                        # declared delta range, so it can do
+                                        # nothing the ordinary memory slider
+                                        # could not already do - the escape is
+                                        # the thing being gated, not the knob.
+                                        #
+                                        # With XOC its ceiling is the memory
+                                        # clock itself. That is a TYPO CATCHER
+                                        # and is labelled as one: an offset
+                                        # larger than the clock it is added to
+                                        # would more than double the memory
+                                        # speed and is a slip, not a plan.
+                                        # Nothing here is a hardware limit -
+                                        # the write is unchecked all the way
+                                        # down - so Druta must not present its
+                                        # own number as though the card had
+                                        # supplied it.
+                                        if kn.xoc_only:
+                                            lo_d, hi_d = mem_lo, mem_hi
+                                            xlo, xhi = -mem_typo, mem_typo
+                                        else:
+                                            lo_d, hi_d = -300, 300
+                                            xlo, xhi = core_xlo, core_xhi
                                         self.slider_row(
-                                            kn.key, lbl, -300, 300, init,
+                                            kn.key, lbl, lo_d, hi_d, init,
                                             lambda v, _d=kn.ctrl, _k=kn.key:
                                                 self.apply_domain_offset(_d, _k, v),
                                             note=kn.note, color=col,
-                                            xoc_lo=core_xlo, xoc_hi=core_xhi,
+                                            xoc_lo=xlo, xoc_hi=xhi,
                                             extra=("Stock", lambda _k=kn.key:
                                                    self.stock_knob(_k)))
+                                    # SAY IT WHERE THE KNOB IS, and say what
+                                    # was MEASURED on this architecture rather
+                                    # than what was inferred. Those came apart
+                                    # badly here twice: once when an XBAR
+                                    # result on GP102 was generalised to every
+                                    # domain, and once when a Blackwell result
+                                    # taken far inside the declared range was
+                                    # generalised past it.
+                                    #
+                                    # The generations genuinely disagree. Pascal
+                                    # carries the memory clock PAST its declared
+                                    # ceiling; Blackwell clamps at exactly the
+                                    # declared maximum. A single sentence cannot
+                                    # be true for both, so the note is built
+                                    # from the measurement table.
+                                    arch = self.gpu.arch_name() or "this card"
+                                    for kn in unverified:
+                                        dom = kn.ctrl
+                                        applies = not self.gpu.clkdom_delta_inert(dom)
+                                        clears = self.gpu.clkdom_delta_clears_ceiling(dom)
+                                        if applies and clears:
+                                            txt, col = (
+                                                f"{arch}: MEASURED to go PAST the "
+                                                f"declared memory ceiling - with the "
+                                                f"ordinary memory slider already at "
+                                                f"its maximum, this carried the clock "
+                                                f"beyond it. This is the only path "
+                                                f"found that does.", GOOD)
+                                        elif applies and clears is False:
+                                            txt, col = (
+                                                f"{arch}: this applies, but it is "
+                                                f"CLAMPED at exactly the declared "
+                                                f"maximum - past that the value "
+                                                f"stores in full and the clock does "
+                                                f"not move. It is a second route to "
+                                                f"the same envelope, not past it.",
+                                                WARN)
+                                        elif applies:
+                                            txt, col = (
+                                                f"{arch}: this applies, but whether "
+                                                f"it passes the declared ceiling is "
+                                                f"UNTESTED here. Watch the Monitor's "
+                                                f"measured memory clock, never the "
+                                                f"value read back.", WARN)
+                                        else:
+                                            txt, col = (
+                                                f"{arch}: on this generation the "
+                                                f"per-domain delta is stored and "
+                                                f"ignored - measured for XBAR on "
+                                                f"GP102. MEM here is unproven; judge "
+                                                f"it only by the measured clock.",
+                                                WARN)
+                                        with dpg.table_row():
+                                            dpg.add_text(
+                                                txt, color=col,
+                                                wrap=self.s(sum(self.KNOB_COLS[:2])))
                                     if not built:
                                         # Say why the knobs are missing. A silently short
                                         # list looks like the feature was never built;
@@ -1867,14 +2042,18 @@ class Druta:
                                         # different and fixable thing.
                                         with dpg.table_row():
                                             dpg.add_text(
-                                                "Per-domain clock offsets: none is shown "
-                                                "for this card. A knob appears only where "
-                                                "moving it was measured to move the "
-                                                "card's MEASURED clock - on GP102 the "
-                                                "driver records the request and the "
-                                                "hardware ignores it, which shows up as "
-                                                "the Monitor's delta going red in "
-                                                "proportion to the offset.",
+                                                ("Per-domain clock offsets: none is "
+                                                 "MAPPED for this card"
+                                                 + (", so the memory knob above is the "
+                                                    "only one offered and it is offered "
+                                                    "unproven" if unverified else "")
+                                                 + ". A knob is normally shown only where "
+                                                 "moving it was measured to move the "
+                                                 "card's MEASURED clock - on GP102 the "
+                                                 "driver records the request and the "
+                                                 "hardware ignores it, which shows up as "
+                                                 "the Monitor's delta going red in "
+                                                 "proportion to the offset."),
                                                 color=DIM,
                                                 wrap=self.s(sum(self.KNOB_COLS[:2])))
 
