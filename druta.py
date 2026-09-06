@@ -1413,8 +1413,11 @@ class Druta:
         f = (raw or {}).get(rail)
         if not f:
             return None
+        # TWO EXPLICIT LINES, not four values left to wrap. A fourth field
+        # pushed this past the 200 px column and the wrap point landed
+        # mid-pair, so "vmin" and its number ended up on different lines.
         fields = (f"rel {GPU.abs_limit_mv(f, 'reliability'):.0f} / "
-                  f"alt {GPU.abs_limit_mv(f, 'alt_reliability'):.0f} / "
+                  f"alt {GPU.abs_limit_mv(f, 'alt_reliability'):.0f}\n"
                   f"ov {GPU.abs_limit_mv(f, 'overvoltage'):.0f} / "
                   f"vmin {GPU.rail_floor_mv(f):.0f} mV")
         # The cap prefers the card's OWN effective limit over anything derived
@@ -1431,13 +1434,18 @@ class Druta:
         # written and would be a lie now: each rail reports a live voltage, and
         # they were proven independent by clamping one rail at a time and
         # watching only that rail's number move.
+        # NO UNIT ON THE CAP CELL. It lands in the narrow 66 px input-box
+        # column, and "cap 1040 mV" is about one character too wide for it -
+        # NVVDD overflowed into the live reading beside it while MSVDD's
+        # shorter "cap 990 mV" fitted, so the bug only showed on one row. The
+        # unit is on the line before it and on the cell after it.
         s = (state or {}).get(rail) or {}
         if s.get("effective"):
-            cap = f"cap {s['effective']:.0f} mV"
+            cap = f"cap {s['effective']:.0f}"
         elif rail == 0:
-            cap = f"-> {GPU.rail_ceiling_mv(f):.0f} mV"
+            cap = f"-> {GPU.rail_ceiling_mv(f):.0f}"
         else:
-            cap = "-> no rail readback"
+            cap = "no readback"
         live = f"live {s['live']:.0f} mV" if s.get("live") else "live --"
         return (("NVVDD" if rail == 0 else "MSVDD") + " limits",
                 fields, cap, live)
@@ -1956,10 +1964,13 @@ class Druta:
                                 # direction.
                                 self.slider_row(
                                     "vlim_ov", "NVVDD overvoltage (mV)",
-                                    lo_mv, hi_mv,
+                                    lo_mv,
+                                    int(round(GPU.stock_limit_mv(
+                                        0, "overvoltage"))),
                                     int(round(GPU.abs_limit_mv(lim[0],
                                                                "overvoltage"))),
                                     lambda v: self.apply_vlim(0, overvoltage=v),
+                                    xoc_hi=hi_mv,
                                     extra=("Stock",
                                            lambda _k="vlim_ov":
                                            self.stock_knob(_k)))
@@ -2028,11 +2039,14 @@ class Druta:
                                            self.stock_knob(_k)))
                                 self.slider_row(
                                     "vlim1_ov", "MSVDD overvoltage (mV)",
-                                    lo_mv, hi_mv,
+                                    lo_mv,
+                                    int(round(GPU.stock_limit_mv(
+                                        1, "overvoltage"))),
                                     int(round(GPU.abs_limit_mv(lim[1],
                                                                "overvoltage"))),
                                     lambda v: self.apply_vlim(1, overvoltage=v),
                                     color=WARN,
+                                    xoc_hi=hi_mv,
                                     extra=("Stock",
                                            lambda _k="vlim1_ov":
                                            self.stock_knob(_k)))

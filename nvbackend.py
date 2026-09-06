@@ -3477,6 +3477,31 @@ class GPU:
     def rail_floor_mv(cls, fields):
         return cls.abs_limit_mv(fields, "vmin")
 
+    @classmethod
+    def stock_limit_mv(cls, rail, key):
+        """What one limit reads at the power-on values, in absolute mV.
+
+        Exists for the overvoltage knob's DEFAULT upper bound, and the reason
+        is a safety property rather than tidiness. The card enforces
+        min(reliability, alt_reliability, overvoltage), so while overvoltage
+        sits at its factory 1200 mV it is the BACKSTOP that keeps the other
+        two ceilings from reaching the 1250 mV the sliders otherwise allow.
+        Exposing overvoltage with the same upper bound as the ceilings would
+        therefore not merely add a knob - it would quietly raise this card's
+        maximum reachable rail voltage past the value the VBIOS set, as a side
+        effect of a change that read like a display fix.
+
+        So the knob stops here by default, which leaves it able to LOWER the
+        cap - the diagnostic and useful direction - and unable to raise it at
+        all. Going above stock is available, but only with XOC ticked, via the
+        knob's xoc_hi bound: the default headroom past the VBIOS value is
+        exactly zero, and reaching past it is a deliberate act with the rest of
+        the XOC guardrails already removed.
+        """
+        return (cls.VOLT_LIMIT_BASE_MV[key]
+                + cls.VOLT_LIMIT_POWERON[rail][cls.VOLT_LIMIT_FIELDS.index(key)]
+                / 1000.0)
+
     # This card's power-on deltas, in microvolts, in VOLT_LIMIT_FIELDS order.
     # NOT all zero: MSVDD ships 50 mV below NVVDD, so zeroing both would RAISE
     # the MSVDD ceiling rather than restore it.
