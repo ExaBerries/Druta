@@ -1271,6 +1271,38 @@ class Druta:
                      "Watch board power, not this number.", False)
         self.refresh_volt_limits()
 
+    def sync_vcap_to_ceiling(self, raw):
+        """Raise the V/F voltage cap to follow a raised NVVDD ceiling.
+
+        The two are coupled and nothing said so before: the cap is where
+        De-flatten and Max it STOP planning, so raising the rail ceiling
+        without it means the extra voltage is permitted and never planned
+        against - the card is allowed somewhere no tool on this tab will take
+        it, which reads as the ceiling having done nothing.
+
+        RAISES ONLY. Following the ceiling downward would silently shrink a
+        band the user built on purpose, and a cap above what the rail delivers
+        is harmless: below_cap() resolves it to the highest point at or below,
+        so it lands on a real curve point either way.
+
+        Snapped DOWN to the point grid for the same reason vcap_changed snaps
+        down - the number in the box has to be a cap something can actually be
+        planned against.
+        """
+        if not (raw and dpg.does_item_exist("vcap")):
+            return
+        reach = GPU.rail_ceiling_mv(raw[0])
+        cur = float(dpg.get_value("vcap"))
+        snapped = math.floor(reach / self.VCAP_STEP + 1e-9) * self.VCAP_STEP
+        if snapped <= cur + 1e-6:
+            return
+        dpg.set_value("vcap", snapped)
+        self.vf_redraw()
+        self.log(f"V/F voltage cap raised {cur:.2f} -> {snapped:.2f} mV, "
+                 f"following the NVVDD ceiling at {reach:.0f} mV. De-flatten "
+                 f"and Max it plan up to that line, so it has to move or the "
+                 f"headroom you just allowed goes unused.", True)
+
     def stock_knob(self, key):
         """Put ONE knob back to stock and apply it.
 
@@ -1308,6 +1340,9 @@ class Druta:
         raw = self.gpu.read_volt_rail_limits()
         if not raw:
             return
+        # Before the readout, so the cap and the ceiling can never be shown
+        # disagreeing for a frame.
+        self.sync_vcap_to_ceiling(raw)
         for r in (0, 1):
             cells = self.volt_limits_cells(raw, r)
             if not cells:
