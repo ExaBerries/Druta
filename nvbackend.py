@@ -4158,10 +4158,12 @@ class GPU:
         gives: the low-voltage floor is many points pinned at the minimum clock,
         and ramping them means demanding high clocks at tiny voltages.
 
-        Points ABOVE the cap are levelled onto the top rung. They are unreachable
-        on this card (the rail stops near 1.093 V), and levelling keeps the cap
-        point the LOWEST-voltage member of the top flat, which is where the
-        arbiter then parks - the same trick de-flatten ends on.
+        Points ABOVE the cap are left untouched. Levelling them onto the top
+        rung used to make the cap the park point, but it did so by DEMOTING
+        them, and a planner that never places a rung below stock cannot make an
+        exception for the points above the band. The cap now bounds the band
+        rather than the card: the curve keeps rising past it and the arbiter
+        parks at the highest point the rail can actually reach.
 
         The granularity and the overclock are the SAME edit: every rung demands
         more clock at its voltage than stock did, so every rung has to be
@@ -4237,9 +4239,23 @@ class GPU:
         for i in band:
             if khz[i] != plan[i]:
                 new[i] = plan[i]
-        for i in above:                    # flat top; park = the cap point
-            if khz[i] != top:
-                new[i] = top
+        # POINTS ABOVE THE CAP ARE LEFT ALONE. They used to be levelled onto
+        # the top rung, which made the cap point the lowest-voltage member of
+        # the peak flat and therefore the park point. That levelling was a
+        # DEMOTION - up to 210 MHz off a single point on this card's curve -
+        # and "never plan a rung below stock" does not get an exception for
+        # the points nobody looked at.
+        #
+        # It also bought nothing here. The cap sits above what the rail can
+        # reach - measured, this one saturates near 1150 mV while the cap is
+        # set around 1206 - so every point it demoted was unreachable, and
+        # demoting an unreachable point cannot move the park point.
+        #
+        # The trade is real and worth stating: on a card whose rail CAN climb
+        # past the cap, levelling was what made the voltage cap bound the CARD
+        # rather than just the plan. Without it the cap bounds the band, the
+        # curve keeps rising above it, and the arbiter parks at the highest
+        # point the rail actually reaches. That is the behaviour asked for.
         floor_after = plan[L]
         # The point immediately UNDER the band keeps whatever it had, so a
         # clipped ramp can land its floor below its own neighbour. On paper that
