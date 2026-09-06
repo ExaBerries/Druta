@@ -1281,17 +1281,31 @@ class Druta:
             # that follows an MSVDD clamp while NVVDD's stays put. So the line
             # now quotes what the rail actually did rather than telling the
             # user to go and measure board power.
+            # SAMPLED IMMEDIATELY AFTER THE WRITE, which is a caveat and not a
+            # confirmation: a ceiling PERMITS a voltage, the arbiter then
+            # decides whether to take it, and this read can easily land before
+            # it has. The number is what the rail says now, nothing more.
+            #
+            # The ~20 W board-power result is deliberately described as a past
+            # experiment rather than as evidence about THIS write. It
+            # established that the field reaches hardware at all; it says
+            # nothing about the value just sent, and wording it as
+            # confirmation would be exactly the mistake this file keeps
+            # warning about.
             live = self.gpu.read_rail_live_mv(1)
-            if live:
-                self.log(f"MSVDD now reading {live:.0f} mV live. It also shows "
-                         f"up as board power - about 20 W between 900 and "
-                         f"1200 mV - which is the independent confirmation "
-                         f"the reading itself cannot provide.", ok)
+            if live is not None:
+                self.log(f"MSVDD reads {live:.0f} mV immediately after the "
+                         f"write. A ceiling permits a voltage rather than "
+                         f"setting one, so this may not have settled yet - "
+                         f"watch the live cell. That the field reaches "
+                         f"hardware was established separately, as ~20 W of "
+                         f"board power between 900 and 1200 mV.", ok)
             else:
-                self.log("MSVDD applies - measured at ~20 W of board power "
-                         "between 900 and 1200 mV. No live rail reading is "
-                         "available on this card, so confirm an effect "
-                         "against board power.", False)
+                self.log("MSVDD limits written, but the rail did not read "
+                         "back this time, so nothing here confirms an effect. "
+                         "The field is known to reach hardware - ~20 W of "
+                         "board power between 900 and 1200 mV - but that was "
+                         "a separate experiment, not this write.", False)
         self.refresh_volt_limits()
 
     def sync_vcap_to_ceiling(self, raw):
@@ -1388,6 +1402,8 @@ class Druta:
                 dpg.set_value(f"vlim_reach{r}", cells[2])
             if dpg.does_item_exist(f"vlim_live{r}"):
                 dpg.set_value(f"vlim_live{r}", cells[3])
+            if dpg.does_item_exist(f"vlim_eff{r}"):
+                dpg.set_value(f"vlim_eff{r}", cells[4])
         # One knob per field, each showing its own value. The number they add
         # up to is in the readout line above, not folded into a slider.
         for key, field in (("vlim_rel", "reliability"),
@@ -1406,7 +1422,7 @@ class Druta:
 
     @staticmethod
     def volt_limits_cells(raw, rail, state=None):
-        """One rail's limits as (label, fields, cap, live), for four cells.
+        """One rail's limits as (label, fields, cap, live, eff), for five cells.
 
         Split across cells rather than joined into one string: a single line
         holding both rails overflowed the 230 px label column and was silently
@@ -1429,12 +1445,26 @@ class Druta:
                   f"alt {GPU.abs_limit_mv(f, 'alt_reliability'):.0f}\n"
                   f"ov {GPU.abs_limit_mv(f, 'overvoltage'):.0f} / "
                   f"vmin {GPU.rail_floor_mv(f):.0f} mV")
-        # The cap prefers the card's OWN effective limit over anything derived
-        # here. That is not a style choice: our ceiling is computed from bases
-        # this file assumes, so quoting it beside the fields it came from tells
-        # the user nothing they did not already give us. The card's number is
-        # arrived at independently, and when the two disagree the disagreement
-        # is the most useful thing on the panel.
+        # THE CAP CELL KEEPS ITS ORIGINAL QUANTITY: rail_ceiling_mv, the
+        # highest this rail reaches at 100% voltage boost. It was briefly
+        # switched to the card's `effective` field, which has NO boost term,
+        # and that was a silent change of meaning under an unchanged widget
+        # tag - the panel would have understated the reachable maximum by the
+        # whole boost headroom while sync_vcap_to_ceiling and the write log
+        # went on quoting the boost-inclusive number. Two numbers in one place
+        # is fine; two meanings under one label is not.
+        #
+        # The card's own effective limit gets its OWN cell instead, which is
+        # where the value of having it actually lies: it is min(rel, alt, ov)
+        # computed by the card rather than by our assumed bases, so when it
+        # disagrees with the fields beside it, the disagreement is the most
+        # useful thing on the row.
+        #
+        # NO UNIT ON THE CAP CELL. It lands in the narrow 66 px input-box
+        # column, and "cap 1040 mV" is about one character too wide for it -
+        # NVVDD overflowed into the live reading beside it while MSVDD's
+        # shorter "cap 990 mV" fitted, so the bug only showed on one row. The
+        # unit is on the line before it and on the cell after it.
         #
         # BOTH rails are quoted now. This used to say "no rail readback" for
         # MSVDD because nothing on the card reported that rail, so its bases
@@ -1443,21 +1473,12 @@ class Druta:
         # written and would be a lie now: each rail reports a live voltage, and
         # they were proven independent by clamping one rail at a time and
         # watching only that rail's number move.
-        # NO UNIT ON THE CAP CELL. It lands in the narrow 66 px input-box
-        # column, and "cap 1040 mV" is about one character too wide for it -
-        # NVVDD overflowed into the live reading beside it while MSVDD's
-        # shorter "cap 990 mV" fitted, so the bug only showed on one row. The
-        # unit is on the line before it and on the cell after it.
         s = (state or {}).get(rail) or {}
-        if s.get("effective"):
-            cap = f"cap {s['effective']:.0f}"
-        elif rail == 0:
-            cap = f"-> {GPU.rail_ceiling_mv(f):.0f}"
-        else:
-            cap = "no readback"
+        cap = f"cap {GPU.rail_ceiling_mv(f):.0f}"
         live = f"live {s['live']:.0f} mV" if s.get("live") else "live --"
+        eff = f"eff {s['effective']:.0f}" if s.get("effective") else ""
         return (("NVVDD" if rail == 0 else "MSVDD") + " limits",
-                fields, cap, live)
+                fields, cap, live, eff)
 
     def risk_features(self):
         """Which guardrail-removing features are actually live right now.
@@ -1523,7 +1544,14 @@ class Druta:
                 if dpg.does_item_exist(pre + k):
                     dpg.configure_item(pre + k,
                                        enabled="volt_limits" in live)
-        for tag in ("go_vlim_rel_x", "vlim_link"):
+        # The eight per-row Stock buttons are deliberately NOT in that list.
+        # reset_volt_rail_limits is documented as ungated on purpose - putting
+        # a rail back to its power-on value is the one write that is safe
+        # whatever the risk state - so disabling the button that performs it
+        # would remove the recovery action exactly when it is wanted. Only one
+        # of the eight was being greyed anyway, which was the inconsistency
+        # that surfaced this.
+        for tag in ("vlim_link",):
             if dpg.does_item_exist(tag):
                 dpg.configure_item(tag, enabled="volt_limits" in live)
 
@@ -1919,6 +1947,14 @@ class Druta:
                                             dpg.add_text(cells[3],
                                                          tag=f"vlim_live{_r}",
                                                          color=GOOD)
+                                            # The card's OWN effective limit,
+                                            # in its own cell rather than
+                                            # replacing the cap: min(rel, alt,
+                                            # ov) as the card computes it, sat
+                                            # beside the bases we assumed.
+                                            dpg.add_text(cells[4],
+                                                         tag=f"vlim_eff{_r}",
+                                                         color=DIM)
                                     # EXPERIMENTAL, and gated on the Rail limits box. The
                                     # ceiling does not APPLY a voltage - it permits one, and
                                     # the arbiter then takes the highest V/F point at or
@@ -2004,7 +2040,13 @@ class Druta:
                                         int(round(GPU.abs_limit_mv(lim[0],
                                                                    "overvoltage"))),
                                         lambda v: self.apply_vlim(0, overvoltage=v),
-                                        xoc_hi=hi_mv,
+                                        # BOTH bounds, not just the high one.
+                                    # knob_bounds and sync_slider_ranges
+                                    # each gate the XOC widening on
+                                    # `xoc_lo is not None`, so passing
+                                    # xoc_hi alone is silently dead and
+                                    # the knob would never leave 1200.
+                                    xoc_lo=lo_mv, xoc_hi=hi_mv,
                                         extra=("Stock",
                                                lambda _k="vlim_ov":
                                                self.stock_knob(_k)))
@@ -2080,7 +2122,13 @@ class Druta:
                                                                    "overvoltage"))),
                                         lambda v: self.apply_vlim(1, overvoltage=v),
                                         color=WARN,
-                                        xoc_hi=hi_mv,
+                                        # BOTH bounds, not just the high one.
+                                    # knob_bounds and sync_slider_ranges
+                                    # each gate the XOC widening on
+                                    # `xoc_lo is not None`, so passing
+                                    # xoc_hi alone is silently dead and
+                                    # the knob would never leave 1200.
+                                    xoc_lo=lo_mv, xoc_hi=hi_mv,
                                         extra=("Stock",
                                                lambda _k="vlim1_ov":
                                                self.stock_knob(_k)))
@@ -3066,11 +3114,40 @@ class Druta:
         self.sync_knob_boxes()
         self.log(f"reset incomplete: {failed} step(s) failed" if failed
                  else "reset to stock complete", failed == 0)
+        # The rail limits are among the things reset above, and nothing else
+        # puts their knobs and readout back: refresh_volt_limits runs only from
+        # the three rail-write paths, so without this the eight vlim sliders
+        # and the whole Rails readout kept showing pre-reset numbers - claiming
+        # a ceiling the card no longer had.
+        self.refresh_volt_limits()
         self.vf_read(force=True)
+
+    def refresh_rail_live(self):
+        """Put the live rail voltages back on the panel, every tick.
+
+        These cells were previously written only by refresh_volt_limits, which
+        runs after a rail-limit WRITE and nowhere else. A cell labelled "live"
+        that only moves when you touch a slider is worse than no cell at all:
+        it reads as a rail sitting perfectly still while the card boosts and
+        drops underneath it.
+
+        Only the live cells are updated here, not the whole readout. The limits
+        beside them do not change on their own - nothing but a write moves them
+        - so re-rendering those on every tick would spend an NVAPI call to
+        redraw four identical strings.
+        """
+        state = self.gpu.read_volt_rail_state()
+        for r in (0, 1):
+            tag = f"vlim_live{r}"
+            if not dpg.does_item_exist(tag):
+                continue
+            mv = (state or {}).get(r, {}).get("live")
+            dpg.set_value(tag, f"live {mv:.0f} mV" if mv else "live --")
 
     def refresh_control(self, d):
         c_t = d.get("core_p0max", "?")
         m_t = self.mem_fmt(d.get("mem_p0max"))[0]
+        self.refresh_rail_live()
         # Vcore is formatted on its own, exactly as Tk did: it needs NVAPI AND a
         # non-zero rail reading, and the app runs fine with NVAPI down. Folding
         # it into the conditional made ONE missing field blank the whole

@@ -837,9 +837,13 @@ _RAIL_NAME = {0: "core rail (NVVDD)", 1: "MSVDD"}
 # already recorded for TU102 domain 6.
 #
 # NOT ESTABLISHED, and this is why the write is off by default:
-#   - the card exposes NO MSVDD readback. VoltRailsStatus returns one rail
-#     (NVVDD) and every other version word returns -9, so a write cannot be
-#     read back and the module's usual read-back guard is unavailable here.
+#   - NO LONGER TRUE, kept because the conclusion below still stands: this
+#     said the card exposes no MSVDD readback, because VoltRailsStatus returns
+#     one rail (NVVDD) and every other version word on it returns -9. A
+#     different id does report the rail - see read_volt_rail_state - so a
+#     verifying read IS available now, and anyone reviving this feature should
+#     use it rather than repeat the search. What has NOT changed is the point
+#     below: no effect was ever measured, and that is why the write stays off.
 #   - no measurable effect was found. Against NVVDD as a positive control at
 #     the same magnitude - which moved vcore +10 mV for +25 and +35 mV for
 #     +50, frequency-locked - rail 1 moved neither vcore nor board power at
@@ -2603,9 +2607,12 @@ class GPU:
             # Off by default, and not something a slider can turn on by itself.
             # See the class attribute for what is and is not established about
             # this field.
-            return False, ("rail 1 writes are disabled: nothing on this card "
-                           "can read the rail back, so the write cannot be "
-                           "verified. Set GPU.msvdd_write_enabled to allow it.")
+            return False, ("rail 1 writes are disabled: this offset has "
+                           "never been shown to move anything, and NVVDD as a "
+                           "positive control did move at the same magnitude. "
+                           "The rail itself IS readable now via "
+                           "read_volt_rail_state, so the check is available. "
+                           "Set GPU.msvdd_write_enabled to allow it.")
         uv = int(round(mv * 1000))
         st, buf = self._clkdom_get(1 << domain)
         if st != 0:
@@ -3205,6 +3212,15 @@ class GPU:
             for n, key in enumerate(self.LIVE_RAIL_FIELDS):
                 v = pu[base + n]
                 rec[key] = v if key == "type" else v / 1000.0
+            # THE INDEX IDENTIFIES THE RAIL, not the type field. type is
+            # decoded and returned so a caller can check it - on this card it
+            # reads 1 for NVVDD and 3 for MSVDD - but it is deliberately not
+            # used to key the result. The limit block and the write path both
+            # address rails positionally, and a reader that keyed off type
+            # while the writer keyed off index could disagree about which rail
+            # is which, which is the one disagreement that must never happen
+            # here. Positional everywhere, and the discriminator exposed.
+            #
             # An all-zero record means the mask selected a rail this card does
             # not have. Reporting 0.0 mV as a live voltage would be worse than
             # reporting nothing.
@@ -3227,9 +3243,10 @@ class GPU:
     # the card was observed holding.
     # overvoltage is based at 1200, and that was WRONG here as 1040 until the
     # absolute block above made it checkable. Requesting 1000 produced an
-    # absolute limit of 1160 mV, 900 -> 1060, 850 -> 1010: a flat +200 offset
-    # from what a 1040 base predicts, on both rails. The error was invisible
-    # for as long as the only readback was the delta we had just written.
+    # absolute limit of 1160 mV, 900 -> 1060, 850 -> 1010 - each exactly
+    # +160 mV above what a 1040 base predicts, on both rails, which is the gap
+    # between 1040 and 1200. The error was invisible for as long as the only
+    # readback was the delta we had just written.
     VOLT_LIMIT_BASE_MV = {"reliability": 1040.0, "alt_reliability": 1060.0,
                           "overvoltage": 1200.0, "vmin": 800.0}
 
