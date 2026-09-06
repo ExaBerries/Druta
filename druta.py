@@ -1144,6 +1144,15 @@ class Druta:
     # were wasting is what made the tab need scrolling.
     KNOB_COLS = (210, 200, 66, 92, 78, 74)
 
+    # One Control-tab column, unscaled: the knob table plus the padding either
+    # side of it. The viewport sizes itself from this same number, so a column
+    # and the window it has to fit in can never drift apart.
+    KNOB_COL_PAD = 34
+
+    def knob_col_width(self):
+        """Width of ONE knob column, scaled for this display."""
+        return self.s(sum(self.KNOB_COLS) + self.KNOB_COL_PAD)
+
     # Per-domain clock offsets, in the order they are shown. Only rows whose
     # domain the driver actually accepts are built (see build_control), so a
     # card with a shorter domain list shows a shorter list of knobs.
@@ -1673,7 +1682,15 @@ class Druta:
             # scroll region. Widths come from the knob table itself, so a
             # column can never be narrower than the rows it holds.
             with dpg.group(horizontal=True):
-                with dpg.group():
+                # EXPLICIT WIDTH, and it is load-bearing rather than tidy. A
+                # DearPyGui collapsing_header inside a group with no width
+                # expands to the whole window, not to its column: the left
+                # column's "Limits" and "Clock offsets" bars were being drawn
+                # clean across the right column and landing on top of the
+                # NVVDD rail rows, so a header on one side highlighted a
+                # voltage knob on the other. Constraining the group is what
+                # stops it - the header has no width argument of its own.
+                with dpg.group(width=self.knob_col_width()):
                     with dpg.collapsing_header(label="Clock offsets", default_open=True):
                         with dpg.table(header_row=False, no_host_extendX=True,
                                        policy=dpg.mvTable_SizingFixedFit):
@@ -1846,7 +1863,7 @@ class Druta:
                                             extra=("Auto", self.fan_auto))
 
                 dpg.add_spacer(width=self.s(18))
-                with dpg.group():
+                with dpg.group(width=self.knob_col_width()):
                     # RAILS GET THEIR OWN SECTION. The tab had grown past a screen and
                     # needed scrolling to reach knobs that matter, and these belong
                     # together on their own terms anyway: everything here acts on a
@@ -7920,7 +7937,10 @@ deliberately does not put behind a button."""
         # Wide enough for the Control tab's two columns: each is the knob
         # table plus padding, so the width follows KNOB_COLS rather than being
         # a number that has to be remembered when a column is resized.
-        _two_col = 2 * (sum(self.KNOB_COLS) + 34) + 36
+        # Both columns, the 18 px spacer between them, and the window's own
+        # padding. Shares KNOB_COL_PAD with knob_col_width so the viewport and
+        # the columns it has to hold are computed from one number.
+        _two_col = 2 * (sum(self.KNOB_COLS) + self.KNOB_COL_PAD) + 36
         dpg.create_viewport(title=title, width=self.s(max(1180, _two_col)),
                             height=vh)
         self.load_fonts()
