@@ -289,6 +289,7 @@ class Druta:
         self._once = {}            # log-dedup state, keyed per source
         self._ctl_widgets = []     # write widgets greyed out while locked
         self._slider_ranges = {}   # knob key -> KnobRange, filled by slider_row
+        self._knob_cb = {}         # knob key -> its apply callback, for Stock
         self._xoc_bounds = False   # are the XOC bounds the ones on the knobs?
         # The slider and its text box write each other. DPG does not fire a
         # callback for set_value, so the loop cannot close today - this makes
@@ -1264,10 +1265,33 @@ class Druta:
             # landing proves the register took the value and nothing more:
             # this card exposes no MSVDD voltage anywhere, so there is no
             # observation available that could confirm the rail moved.
-            self.log("MSVDD: stored and read back, but this card exposes no "
-                     "MSVDD rail voltage - nothing here can confirm the rail "
-                     "actually moved. Cross-check externally.", False)
+            self.log("MSVDD: this rail APPLIES - measured at ~20 W of board "
+                     "power between 900 and 1200 mV - but nothing on this card "
+                     "reads it back, so the value you set cannot be seen. "
+                     "Watch board power, not this number.", False)
         self.refresh_volt_limits()
+
+    def stock_knob(self, key):
+        """Put ONE knob back to stock and apply it.
+
+        Goes through the row's own apply callback rather than writing the card
+        directly: a second path to the same register is how the button and the
+        slider end up disagreeing about what was written.
+        """
+        if key.startswith("vlim"):
+            # The limits are one block with a power-on state that is not all
+            # zero, so they reset together through the backend.
+            return self.apply_vlim_reset()
+        if key == "pl":
+            val = self.gpu.static.get("pl_def_mw", 260000) // 1000
+        else:
+            val = 0
+        for pre in ("sl_", "in_"):
+            if dpg.does_item_exist(pre + key):
+                dpg.set_value(pre + key, val)
+        cb = self._knob_cb.get(key)
+        if cb:
+            cb(val)
 
     def apply_vlim_reset(self):
         ok, msg = self.gpu.reset_volt_rail_limits()
@@ -1590,7 +1614,8 @@ class Druta:
                     # was written
                     self.slider_row("core", "Core clock offset (MHz)",
                                     core_lo, core_hi, 0, self.apply_core,
-                                    xoc_lo=core_xlo, xoc_hi=core_xhi)
+                                    xoc_lo=core_xlo, xoc_hi=core_xhi,
+                                    extra=("Stock", lambda _k="core": self.stock_knob(_k)))
 
                     mscale, munit = self.gpu.mem_offset_scale()
                     mlo, mhi = -500, 1500
@@ -1609,7 +1634,9 @@ class Druta:
                     self.slider_row("mem", f"Memory offset ({munit})",
                                     mlo, mhi, 0, self.apply_mem,
                                     xoc_lo=int(mem_xlo / mscale),
-                                    xoc_hi=int(mem_xhi / mscale))
+                                    xoc_hi=int(mem_xhi / mscale),
+                                    extra=("Stock",
+                                           lambda: self.stock_knob("mem")))
 
                     # XBAR reaches a domain NVIDIA does not expose publicly at
                     # all: NV_GPU_PUBLIC_CLOCK_ID has no crossbar member, and
@@ -1666,7 +1693,9 @@ class Druta:
                                 lambda v, _d=kn.ctrl, _k=kn.key:
                                     self.apply_domain_offset(_d, _k, v),
                                 note=kn.note, color=col,
-                                xoc_lo=core_xlo, xoc_hi=core_xhi)
+                                xoc_lo=core_xlo, xoc_hi=core_xhi,
+                                extra=("Stock", lambda _k=kn.key:
+                                       self.stock_knob(_k)))
                         if not built:
                             # Say why the knobs are missing. A silently short
                             # list looks like the feature was never built;
@@ -1696,13 +1725,17 @@ class Druta:
                     pl_hi = st.get("pl_max_mw", 320000) // 1000
                     pl_def = st.get("pl_def_mw", 260000) // 1000
                     self.slider_row("pl", "Power limit (W)", pl_lo, pl_hi,
-                                    pl_def, self.apply_pl)
+                                    pl_def, self.apply_pl,
+                                    extra=("Stock",
+                                           lambda: self.stock_knob("pl")))
 
                     vb = self.gpu.read_voltage_boost()
                     # raises the reliability-voltage ceiling
                     self.slider_row("volt", "Core voltage boost (%)", 0, 100,
                                     0 if vb is None else max(0, min(100, int(vb))),
-                                    self.apply_volt)
+                                    self.apply_volt,
+                                    extra=("Stock",
+                                           lambda: self.stock_knob("volt")))
 
                     # The ceiling the boost slider above is actually working
                     # against. READ-ONLY, and that is a finding rather than a
@@ -1781,31 +1814,36 @@ class Druta:
                             lo_mv, hi_mv,
                             int(round(GPU.abs_limit_mv(lim[0],
                                                        "alt_reliability"))),
-                            lambda v: self.apply_vlim(0, alt_reliability=v))
+                            lambda v: self.apply_vlim(0, alt_reliability=v),
+                            extra=("Stock", self.apply_vlim_reset))
                         self.slider_row(
                             "vlim_lo", "NVVDD vmin (mV)", lo_mv, hi_mv,
                             int(round(GPU.rail_floor_mv(lim[0]))),
-                            lambda v: self.apply_vlim(0, vmin=v))
+                            lambda v: self.apply_vlim(0, vmin=v),
+                            extra=("Stock", self.apply_vlim_reset))
 
-                        # MSVDD, and the label says UNVERIFIED for a reason
-                        # that is not caution: the write demonstrably lands -
-                        # all three fields store and read back exactly - but
-                        # NOTHING ON THIS CARD READS THE MSVDD RAIL. A second
-                        # sweep across seven volt-family structs, including a
-                        # full version sweep of the rails status call, moved
-                        # exactly one dword under load and it was NVVDD's. So
-                        # the read-back proves storage and cannot prove effect,
-                        # and the bases these millivolts are computed from are
-                        # inherited from NVVDD by assumption. Exposed anyway,
-                        # because a knob that can be cross-checked against an
-                        # external reading is how that assumption stops being
-                        # one - and unverifiable is a thing to SAY, not a
-                        # reason to hide the control.
+                        # MSVDD APPLIES. Measured: clamping the ceiling 900
+                        # against 1200 mV moved board power by about 20 W,
+                        # six paired cycles out of six agreeing in sign with
+                        # the A/B order flipped each cycle, while vcore, core
+                        # clock and memory clock stayed put. So this reaches
+                        # hardware.
+                        #
+                        # What is missing is a READBACK, not an effect - and
+                        # that combination is worse than either alone. NOTHING
+                        # on this card reads the MSVDD rail: a sweep across
+                        # seven volt-family structs, including a full version
+                        # sweep of the rails status call, moved exactly one
+                        # dword under load and it was NVVDD's. An earlier
+                        # label here said UNVERIFIED, which read as "probably
+                        # inert" - the opposite of the truth, and the more
+                        # dangerous way to be wrong.
                         with dpg.table_row():
                             dpg.add_text("MSVDD", color=WARN)
-                            dpg.add_text("UNVERIFIED - stores and reads back, "
-                                         "but no MSVDD rail voltage is exposed "
-                                         "on this card to confirm the effect",
+                            dpg.add_text("APPLIES, NO READBACK - measured at "
+                                         "~20 W between 900 and 1200 mV, but "
+                                         "nothing on this card reads this rail "
+                                         "back. You cannot see what you set.",
                                          color=WARN,
                                          wrap=self.s(self.KNOB_COLS[1]))
                         self.slider_row(
@@ -1814,19 +1852,22 @@ class Druta:
                             int(round(GPU.abs_limit_mv(lim[1],
                                                        "reliability"))),
                             lambda v: self.apply_vlim(1, reliability=v),
-                            color=WARN)
+                            color=WARN,
+                            extra=("Stock", self.apply_vlim_reset))
                         self.slider_row(
                             "vlim1_alt", "MSVDD alt-reliability (mV)",
                             lo_mv, hi_mv,
                             int(round(GPU.abs_limit_mv(lim[1],
                                                        "alt_reliability"))),
                             lambda v: self.apply_vlim(1, alt_reliability=v),
-                            color=WARN)
+                            color=WARN,
+                            extra=("Stock", self.apply_vlim_reset))
                         self.slider_row(
                             "vlim1_lo", "MSVDD vmin (mV)", lo_mv, hi_mv,
                             int(round(GPU.rail_floor_mv(lim[1]))),
                             lambda v: self.apply_vlim(1, vmin=v),
-                            color=WARN)
+                            color=WARN,
+                            extra=("Stock", self.apply_vlim_reset))
 
                     # A SECOND mechanism on the same rail as the boost above,
                     # and the note says so: they are different calls, neither
@@ -1904,7 +1945,8 @@ class Druta:
                             int(rp.env_min), int(rp.env_max),
                             int(tel.get("offset_mv") or 0),
                             self.apply_i2c_rail,
-                            extra=("Verify", self.verify_i2c_rail),
+                            extra=[("Verify", self.verify_i2c_rail),
+                                   ("Stock", lambda: self.stock_knob("i2c"))],
                             color=BAD,
                             # The register's own representable range, not a
                             # policy: past it the field wraps through its sign
@@ -1941,6 +1983,9 @@ class Druta:
         bound is the unit itself - the voltage boost is a percentage of the
         VBIOS headroom and 101% is not a bigger overclock, it is nonsense."""
         self._slider_ranges[key] = KnobRange(label, lo, hi, xoc_lo, xoc_hi)
+        # Remembered so a Stock button can drive the SAME apply path the row's
+        # own button does, rather than a second one that could drift from it.
+        self._knob_cb[key] = cb
         with dpg.table_row():
             # colour is normally TEXT; the per-domain offsets pass the Monitor's
             # grade colour so a hedged name looks hedged on both tabs
@@ -1999,10 +2044,15 @@ class Druta:
             dpg.add_button(label="Apply", tag=f"go_{key}", width=-1,
                            callback=lambda: cb(dpg.get_value(f"sl_{key}")))
             self._ctl_widgets += [f"sl_{key}", f"in_{key}", f"go_{key}"]
-            if extra:
-                dpg.add_button(label=extra[0], tag=f"go_{key}_x",
-                               width=-1, callback=lambda: extra[1]())
-                self._ctl_widgets.append(f"go_{key}_x")
+            # extra is one (label, cb) pair or a list of them: the I2C row
+            # wants Verify AND Stock, and one slot cannot hold both.
+            extras = ([] if not extra else
+                      [extra] if isinstance(extra[0], str) else list(extra))
+            for n, (lbl, xcb) in enumerate(extras):
+                tag = f"go_{key}_x" if n == 0 else f"go_{key}_x{n}"
+                dpg.add_button(label=lbl, tag=tag, width=-1,
+                               callback=lambda _c=xcb: _c())
+                self._ctl_widgets.append(tag)
 
     # ---- slider <-> text box, and what either is allowed to reach ---------- #
     def knob_bounds(self, key):
@@ -7558,6 +7608,7 @@ deliberately does not put behind a button."""
             # and a card switch is exactly when they stop being true. The flag
             # goes with it because the rebuilt XOC checkbox comes up unticked.
             self._slider_ranges = {}
+            self._knob_cb = {}
             self._xoc_bounds = False
             for tag in ("hdr_row", "tabs", "menubar", "win_device", "win_save",
                         "win_profiles", "win_keys", "win_about",
