@@ -19,7 +19,7 @@
 """
 Druta - GPU backend (NVAPI + NVML), read + guarded write.
 
-Built for the Titan RTX (TU102, DEV_1E02) on the ASUS 2080 Ti Strix PCB, but
+Built for the Titan RTX (TU102, DEV_1E02) on a 2080 Ti PCB, but
 falls back to GPU index 0 for any NVIDIA card. All struct layouts are lifted
 verbatim from the read-only probes verified live on this card (driver 591.44):
 NVAPI ids and NVML field numbers were confirmed against the hardware, not guessed.

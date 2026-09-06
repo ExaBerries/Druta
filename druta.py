@@ -5807,7 +5807,7 @@ deliberately does not put behind a button."""
                          "(Titan Xp). Per-card quantities - V/F point count, "
                          "clock grid, domain names - are probed from the "
                          "driver rather than assumed. Developed against a "
-                         "Titan RTX die on an ASUS RTX 2080 Ti Strix board, "
+                         "Titan RTX die on a 2080 Ti board, "
                          "and a stock Titan Xp.", wrap=self.s(580))
             dpg.add_spacer(height=self.s(6))
             dpg.add_text("README.md, shipped beside this app, is the single "
