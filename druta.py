@@ -1276,8 +1276,14 @@ class Druta:
         raw = self.gpu.read_volt_rail_limits()
         if not raw:
             return
-        if dpg.does_item_exist("volt_limits_txt"):
-            dpg.set_value("volt_limits_txt", self.volt_limits_text(raw))
+        for r in (0, 1):
+            cells = self.volt_limits_cells(raw, r)
+            if not cells:
+                continue
+            if dpg.does_item_exist(f"vlim_txt{r}"):
+                dpg.set_value(f"vlim_txt{r}", cells[1])
+            if dpg.does_item_exist(f"vlim_reach{r}"):
+                dpg.set_value(f"vlim_reach{r}", cells[2])
         # One knob per field, each showing its own value. The number they add
         # up to is in the readout line above, not folded into a slider.
         for key, field in (("vlim_rel", "reliability"),
@@ -1288,34 +1294,34 @@ class Druta:
                 if dpg.does_item_exist(pre + key):
                     dpg.set_value(pre + key, val)
 
-    def volt_limits_text(self, raw):
-        """The per-rail limits: every field, and what they add up to.
+    @staticmethod
+    def volt_limits_cells(raw, rail):
+        """One rail's limits as (label, fields, reach), for three table cells.
 
-        Both are shown on purpose. The fields are what is stored; the reach is
-        what the card will actually do, and the two can disagree completely -
-        reliability 1150 with alt_reliability at its 1060 base stores exactly
-        what was asked and reaches nothing. Printing only the fields hides
-        that, and printing only the reach hides which knob to move.
+        Split across cells rather than joined into one string: a single line
+        holding both rails overflowed the 230 px label column and was silently
+        clipped mid-number, which on a voltage readout is worse than showing
+        nothing.
 
-        `raw` is the delta form from read_volt_rail_limits.
+        The fields are what is stored; the reach is what the card will actually
+        do, and the two can disagree completely - reliability 1150 with
+        alt_reliability at its 1060 base stores exactly what was asked and
+        reaches nothing. Showing only the fields hides that; showing only the
+        reach hides which knob to move.
         """
-        bits = []
-        for rail, name in ((0, "NVVDD"), (1, "MSVDD")):
-            f = raw.get(rail)
-            if not f:
-                continue
-            s = (f"{name}  rel {GPU.abs_limit_mv(f, 'reliability'):.0f} / "
-                 f"alt {GPU.abs_limit_mv(f, 'alt_reliability'):.0f} / "
-                 f"vmin {GPU.rail_floor_mv(f):.0f}")
-            # The reach is quoted only for the rail it was MEASURED on. The
-            # same arithmetic applied to MSVDD would print a confident number
-            # for a rail whose bases were never pinned and whose boost
-            # behaviour was never observed, which is the overclaim this line
-            # exists to avoid.
-            if rail == 0:
-                s += f"  -> reaches {GPU.rail_ceiling_mv(f):.0f} mV"
-            bits.append(s)
-        return "rail limits:   " + "      ".join(bits)
+        f = (raw or {}).get(rail)
+        if not f:
+            return None
+        fields = (f"rel {GPU.abs_limit_mv(f, 'reliability'):.0f} / "
+                  f"alt {GPU.abs_limit_mv(f, 'alt_reliability'):.0f} / "
+                  f"vmin {GPU.rail_floor_mv(f):.0f} mV")
+        # The reach is quoted only for the rail it was MEASURED on. The same
+        # arithmetic applied to MSVDD would print a confident number for a rail
+        # whose bases were never pinned and whose boost behaviour was never
+        # observed, which is the overclaim this exists to avoid.
+        reach = (f"-> {GPU.rail_ceiling_mv(f):.0f} mV" if rail == 0
+                 else "-> not measured")
+        return ("NVVDD" if rail == 0 else "MSVDD") + " limits", fields, reach
 
     def risk_features(self):
         """Which guardrail-removing features are actually live right now.
@@ -1684,13 +1690,22 @@ class Druta:
                     # these is otherwise invisible from inside Druta.
                     lim = self.gpu.read_volt_rail_limits()
                     if lim:
-                        # In a row of its own: every child of this table has to
-                        # be a table_row, and a bare add_text here fails inside
-                        # DearPyGui rather than at the call.
-                        with dpg.table_row():
-                            dpg.add_text(self.volt_limits_text(lim),
-                                         tag="volt_limits_txt", color=DIM,
-                                         wrap=self.s(sum(self.KNOB_COLS)))
+                        # One row per rail, across the table's OWN columns.
+                        # Every child of this table has to be a table_row, and
+                        # a single joined line does not fit the 230 px label
+                        # column: it was being clipped mid-number, which on a
+                        # voltage readout is worse than showing nothing.
+                        for _r in (0, 1):
+                            cells = self.volt_limits_cells(lim, _r)
+                            if not cells:
+                                continue
+                            with dpg.table_row():
+                                dpg.add_text(cells[0], color=DIM)
+                                dpg.add_text(cells[1], tag=f"vlim_txt{_r}",
+                                             color=DIM,
+                                             wrap=self.s(self.KNOB_COLS[1]))
+                                dpg.add_text(cells[2], tag=f"vlim_reach{_r}",
+                                             color=DIM)
                         # EXPERIMENTAL, and gated on the Rail limits box. The
                         # ceiling does not APPLY a voltage - it permits one, and
                         # the arbiter then takes the highest V/F point at or
@@ -1713,12 +1728,25 @@ class Druta:
                         # so either outcome is visible rather than inferred.
                         lo_mv = int(GPU.VOLT_LIMIT_MIN_MV)
                         hi_mv = int(GPU.VOLT_LIMIT_MAX_MV)
+                        # In the WIDE column: a checkbox label is not wrappable
+                        # in DearPyGui, so a long one in the 230 px label
+                        # column is simply cut off. ON by default because
+                        # moving one ceiling and not the other is the case that
+                        # stores perfectly and changes nothing - the surprising
+                        # outcome should be the one you have to opt into.
                         with dpg.table_row():
+                            dpg.add_text("Ceilings", color=DIM)
                             dpg.add_checkbox(
-                                label="Link reliability + alt-reliability "
-                                      "(moves both, and the boost slider "
-                                      "stops doing anything)",
-                                tag="vlim_link", default_value=False)
+                                label="Link reliability + alt-reliability",
+                                tag="vlim_link", default_value=True,
+                                callback=lambda s, a, u: self.log(
+                                    "rail ceilings linked: both fields move "
+                                    "together, which leaves the voltage boost "
+                                    "slider with no range to work in"
+                                    if a else
+                                    "rail ceilings unlinked: moving only "
+                                    "reliability stores the value but the card "
+                                    "keeps clamping at alt-reliability", True))
                         self.slider_row(
                             "vlim_rel", "NVVDD reliability (mV)", lo_mv, hi_mv,
                             int(round(GPU.abs_limit_mv(lim[0],
