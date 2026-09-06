@@ -3367,23 +3367,46 @@ class GPU:
     def rail_floor_mv(cls, fields):
         return cls.abs_limit_mv(fields, "vmin")
 
-    def reset_volt_rail_limits(self):
-        """Put both rails back to this card's power-on limits.
+    # This card's power-on deltas, in microvolts, in VOLT_LIMIT_FIELDS order.
+    # NOT all zero: MSVDD ships 50 mV below NVVDD, so zeroing both would RAISE
+    # the MSVDD ceiling rather than restore it.
+    VOLT_LIMIT_POWERON = {0: (0, 0, 0, 0), 1: (-50000, 0, 0, 0)}
 
-        NOT all zero: this card ships MSVDD 50 mV below NVVDD, so zeroing both
-        would RAISE the MSVDD ceiling rather than restore it.
+    def reset_volt_rail_limits(self, rail=None, fields=None):
+        """Put limits back to this card's power-on values.
+
+        `rail` None means both; `fields` None means all four. Both are narrowed
+        rather than assumed, because a per-knob Stock button that resets the
+        whole block silently discards settings on the OTHER rail - which is
+        exactly what it did before this took arguments.
 
         Deliberately NOT gated on volt_limits_write_enabled. That gate exists to
-        stop a slider raising a ceiling by itself; this call only ever lowers
-        one back to the power-on value. Refusing it because "writes are
-        disabled" would strand a card on limits the user is trying to clear -
-        which is the exact stickiness that made this feature necessary.
+        stop a slider raising a ceiling by itself; this call only ever returns
+        one to the power-on value. Refusing it because "writes are disabled"
+        would strand a card on limits the user is trying to clear - the exact
+        stickiness that made this feature necessary.
         """
-        ok, status = self._write_rail_records(
-            {0: [0, 0, 0, 0], 1: [-50000, 0, 0, 0]})
+        cur = self.read_volt_rail_limits()
+        if cur is None:
+            return False, "cannot read the current limits"
+        rails = (0, 1) if rail is None else (int(rail),)
+        keys = tuple(fields) if fields else self.VOLT_LIMIT_FIELDS
+        bad = set(keys) - set(self.VOLT_LIMIT_FIELDS)
+        if bad:
+            return False, f"not a rail limit: {', '.join(sorted(bad))}"
+        recs = {r: [int(round(cur[r][k] * 1000))
+                    for k in self.VOLT_LIMIT_FIELDS] for r in (0, 1)}
+        for r in rails:
+            for k in keys:
+                i = self.VOLT_LIMIT_FIELDS.index(k)
+                recs[r][i] = self.VOLT_LIMIT_POWERON[r][i]
+        ok, status = self._write_rail_records(recs)
         if not ok or status:
             return False, f"reset refused (NV_STATUS 0x{status or 0:X})"
-        return True, "rail limits back to the power-on values"
+        what = ("rail limits" if rail is None and not fields
+                else f"{_RAIL_NAME[rails[0]]} "
+                     + (", ".join(keys) if fields else "limits"))
+        return True, f"{what} back to the power-on values"
 
     def volt_rail_limits_mv(self):
         """The same limits resolved to absolute millivolts, or ``None``."""

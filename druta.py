@@ -1316,9 +1316,16 @@ class Druta:
         slider end up disagreeing about what was written.
         """
         if key.startswith("vlim"):
-            # The limits are one block with a power-on state that is not all
-            # zero, so they reset together through the backend.
-            return self.apply_vlim_reset()
+            # ONE field on ONE rail. These share a block, and resetting the
+            # block put the other rail back to stock along with it - pressing
+            # Stock beside an MSVDD knob silently discarded the NVVDD ceiling.
+            rail = 1 if key.startswith("vlim1") else 0
+            field = {"rel": "reliability", "alt": "alt_reliability",
+                     "lo": "vmin"}[key.rsplit("_", 1)[1]]
+            ok, msg = self.gpu.reset_volt_rail_limits(rail=rail,
+                                                      fields=(field,))
+            self.log(msg, ok)
+            return self.refresh_volt_limits()
         if key == "pl":
             val = self.gpu.static.get("pl_def_mw", 260000) // 1000
         else:
@@ -3205,6 +3212,89 @@ class Druta:
         dpg.add_text("--", tag="vf_info", color=DIM, wrap=self.s(1100))
         dpg.add_text("", tag="vf_status", color=WARN, wrap=self.s(1100))
 
+        # THE EDITING CONTROLS SIT ABOVE THE PLOT, not below it. They and
+        # the curve are looked at together - select a point, read what it
+        # holds, nudge it, watch the dot move - and with the controls
+        # underneath, the plot pushed them far enough down that the two
+        # halves of one action were never on screen at once.
+        with dpg.child_window(tag="vf_plan", width=-1, height=self.s(130),
+                              border=True, no_scroll_with_mouse=True):
+            dpg.add_text("", tag="vf_plan_head", wrap=self.s(1100))
+            self.bind("vf_plan_head", "big")
+            dpg.add_text("", tag="vf_plan_body", color=TEXT, wrap=self.s(1100))
+            dpg.add_text("", tag="vf_plan_reset", color=DIM, wrap=self.s(1100))
+        self.update_plan_banner()
+
+        with dpg.group(horizontal=True):
+            dpg.add_text("selected")
+            # bounded HERE, not only in vf_read: an input_int otherwise
+            # carries DPG's default 0..100 unclamped until the first
+            # successful read, so a curve that never reads leaves the box
+            # accepting indices no VF table has. vf_read narrows this to the
+            # points the card actually returned.
+            dpg.add_input_int(tag="vf_idx", default_value=0,
+                              width=self.s(110),
+                              min_value=0, max_value=VFP_POINTS - 1,
+                              min_clamped=True, max_clamped=True,
+                              callback=lambda: self.vf_select(
+                                  dpg.get_value("vf_idx")))
+            # Labels DERIVED from the card's bin, not hardcoded to Turing's 15.
+            # The write was always correct (set_work_freq snaps to step_khz),
+            # but on GP102 a button labelled "+15" moved +12.657 - and it sat
+            # directly above the keyboard hint, which renders the real figure.
+            # Two controls for the same action disagreeing on screen at once.
+            _b, _b5 = self.step_mhz(), self.step_mhz() * 5
+            for lbl, delta in ((f"-{_b5}", -_b5), (f"-{_b}", -_b),
+                               (f"+{_b}", _b), (f"+{_b5}", _b5)):
+                # user_data carries the step: DPG passes (sender, app_data,
+                # user_data) POSITIONALLY, so a default arg would be
+                # clobbered by user_data=None.
+                dpg.add_button(label=lbl, width=self.s(58),
+                               user_data=delta,
+                               callback=lambda s, a, u: self.vf_nudge(u))
+            # bounded to the supported clock range for the same reason as
+            # lock_min/lock_max: an input_int otherwise carries DPG's
+            # default 0..100 and ignores it on entry, so the box could name
+            # a frequency no VF point can hold. sync_sel_inputs seeds it
+            # with the selected point on every read/select/nudge - DPG
+            # clamps user entry only, never set_value.
+            dpg.add_input_int(tag="vf_set", default_value=0,
+                              step=self.step_mhz(),
+                              width=self.s(120),
+                              min_value=self.gpu.static.get("gfx_min", 300),
+                              max_value=self.gpu.static.get("gfx_max", 2160),
+                              min_clamped=True, max_clamped=True)
+            dpg.add_button(label="Set MHz", width=self.s(90),
+                           callback=self.vf_set_freq)
+            dpg.add_button(label="Revert edits", width=self.s(120),
+                           callback=self.vf_revert)
+            # GREEN, and the only coloured button on this row: it is the one
+            # control here that reaches the hardware. Its name says both halves
+            # of what it does - the re-phase is not a separate step the user has
+            # to remember any more (see vf_apply).
+            dpg.add_button(label="Re-phase and apply V/F curve to GPU",
+                           tag="go_vfapply",
+                           width=self.s(300), callback=self.vf_apply)
+            with dpg.theme() as vfapply_th:
+                with dpg.theme_component(dpg.mvAll):
+                    dpg.add_theme_color(dpg.mvThemeCol_Button, (28, 92, 48))
+                    dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered,
+                                        (40, 124, 65))
+                    dpg.add_theme_color(dpg.mvThemeCol_ButtonActive,
+                                        (52, 152, 82))
+                    dpg.add_theme_color(dpg.mvThemeCol_Text, (232, 248, 236))
+            dpg.bind_item_theme("go_vfapply", vfapply_th)
+        self._ctl_widgets += ["go_rephase", "go_vfapply", "go_vfreset"]
+        dpg.add_text("--", tag="vf_sel_info", color=TEXT)
+        self.bind("vf_sel_info", "mono")
+        dpg.add_text(f"drag a dot to move it  \u2022  drag anywhere else to "
+                     f"pan  \u2022  A/D select  \u2022  W/S move "
+                     f"\u00b1{self.step_mhz()} MHz  \u2022  hold Shift for "
+                     f"\u00b1{self.step_mhz() * self.SHIFT_MULT}  \u2022  "
+                     f"Ctrl+H hold the selected point (again to release)  \u2022  "
+                     f"Ctrl+Z / Ctrl+Y undo and redo staged edits",
+                     color=DIM)
+
         # no anti_aliased= here: dpg.plot has no such parameter, and DPG's
         # argument parser DROPS unknown keywords instead of raising, so it
         # read as an applied setting while doing nothing. Line smoothing is
@@ -3316,84 +3406,6 @@ class Druta:
         # scrollbar deliberately NOT suppressed here (the tiles do suppress
         # theirs): plan_h measures this box, and if it ever measures short the
         # tail must still be reachable rather than silently cut off.
-        with dpg.child_window(tag="vf_plan", width=-1, height=self.s(130),
-                              border=True, no_scroll_with_mouse=True):
-            dpg.add_text("", tag="vf_plan_head", wrap=self.s(1100))
-            self.bind("vf_plan_head", "big")
-            dpg.add_text("", tag="vf_plan_body", color=TEXT, wrap=self.s(1100))
-            dpg.add_text("", tag="vf_plan_reset", color=DIM, wrap=self.s(1100))
-        self.update_plan_banner()
-
-        with dpg.group(horizontal=True):
-            dpg.add_text("selected")
-            # bounded HERE, not only in vf_read: an input_int otherwise
-            # carries DPG's default 0..100 unclamped until the first
-            # successful read, so a curve that never reads leaves the box
-            # accepting indices no VF table has. vf_read narrows this to the
-            # points the card actually returned.
-            dpg.add_input_int(tag="vf_idx", default_value=0,
-                              width=self.s(110),
-                              min_value=0, max_value=VFP_POINTS - 1,
-                              min_clamped=True, max_clamped=True,
-                              callback=lambda: self.vf_select(
-                                  dpg.get_value("vf_idx")))
-            # Labels DERIVED from the card's bin, not hardcoded to Turing's 15.
-            # The write was always correct (set_work_freq snaps to step_khz),
-            # but on GP102 a button labelled "+15" moved +12.657 - and it sat
-            # directly above the keyboard hint, which renders the real figure.
-            # Two controls for the same action disagreeing on screen at once.
-            _b, _b5 = self.step_mhz(), self.step_mhz() * 5
-            for lbl, delta in ((f"-{_b5}", -_b5), (f"-{_b}", -_b),
-                               (f"+{_b}", _b), (f"+{_b5}", _b5)):
-                # user_data carries the step: DPG passes (sender, app_data,
-                # user_data) POSITIONALLY, so a default arg would be
-                # clobbered by user_data=None.
-                dpg.add_button(label=lbl, width=self.s(58),
-                               user_data=delta,
-                               callback=lambda s, a, u: self.vf_nudge(u))
-            # bounded to the supported clock range for the same reason as
-            # lock_min/lock_max: an input_int otherwise carries DPG's
-            # default 0..100 and ignores it on entry, so the box could name
-            # a frequency no VF point can hold. sync_sel_inputs seeds it
-            # with the selected point on every read/select/nudge - DPG
-            # clamps user entry only, never set_value.
-            dpg.add_input_int(tag="vf_set", default_value=0,
-                              step=self.step_mhz(),
-                              width=self.s(120),
-                              min_value=self.gpu.static.get("gfx_min", 300),
-                              max_value=self.gpu.static.get("gfx_max", 2160),
-                              min_clamped=True, max_clamped=True)
-            dpg.add_button(label="Set MHz", width=self.s(90),
-                           callback=self.vf_set_freq)
-            dpg.add_button(label="Revert edits", width=self.s(120),
-                           callback=self.vf_revert)
-            # GREEN, and the only coloured button on this row: it is the one
-            # control here that reaches the hardware. Its name says both halves
-            # of what it does - the re-phase is not a separate step the user has
-            # to remember any more (see vf_apply).
-            dpg.add_button(label="Re-phase and apply V/F curve to GPU",
-                           tag="go_vfapply",
-                           width=self.s(300), callback=self.vf_apply)
-            with dpg.theme() as vfapply_th:
-                with dpg.theme_component(dpg.mvAll):
-                    dpg.add_theme_color(dpg.mvThemeCol_Button, (28, 92, 48))
-                    dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered,
-                                        (40, 124, 65))
-                    dpg.add_theme_color(dpg.mvThemeCol_ButtonActive,
-                                        (52, 152, 82))
-                    dpg.add_theme_color(dpg.mvThemeCol_Text, (232, 248, 236))
-            dpg.bind_item_theme("go_vfapply", vfapply_th)
-        self._ctl_widgets += ["go_rephase", "go_vfapply", "go_vfreset"]
-        dpg.add_text("--", tag="vf_sel_info", color=TEXT)
-        self.bind("vf_sel_info", "mono")
-        dpg.add_text(f"drag a dot to move it  \u2022  drag anywhere else to "
-                     f"pan  \u2022  A/D select  \u2022  W/S move "
-                     f"\u00b1{self.step_mhz()} MHz  \u2022  hold Shift for "
-                     f"\u00b1{self.step_mhz() * self.SHIFT_MULT}  \u2022  "
-                     f"Ctrl+H hold the selected point (again to release)  \u2022  "
-                     f"Ctrl+Z / Ctrl+Y undo and redo staged edits",
-                     color=DIM)
-
         # plot-wide mouse + keyboard control. The left button is shared: the
         # plot pans with it, and these handlers steal it for a drag only while
         # the press actually landed on a dot (end_drag hands it back).
