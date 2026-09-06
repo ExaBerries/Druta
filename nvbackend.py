@@ -4432,11 +4432,29 @@ class GPU:
         # which is the complaint that started this work. Only emitted when they
         # are actually off the power-on values, so a stock card does not carry a
         # pointless step.
+        # COMPARED AGAINST VOLT_LIMIT_POWERON, field by field, on both rails.
+        # This used to be a hand-written literal for rail 0 plus two spot
+        # checks on rail 1 - its vmin and its reliability - which left MSVDD's
+        # alt_reliability and overvoltage unexamined. A clamp on either of
+        # those produced no reset step at all, so "reset to stock complete"
+        # was reported over a rail still carrying it, on driver state that a
+        # reboot does not clear. That gap was unreachable from the UI until
+        # the overvoltage knobs shipped, and MSVDD overvoltage is precisely
+        # what one of them writes.
+        #
+        # Derived from the same constant reset_volt_rail_limits writes back,
+        # so the test and the fix cannot drift apart the way a literal did.
         cur = self.read_volt_rail_limits()
-        if cur and (cur[0] != {"type": cur[0]["type"], "reliability": 0.0,
-                               "alt_reliability": 0.0, "overvoltage": 0.0,
-                               "vmin": 0.0}
-                    or cur[1]["vmin"] or cur[1]["reliability"] != -50.0):
+        off_stock = False
+        for rail, fields in (cur or {}).items():
+            want = self.VOLT_LIMIT_POWERON.get(rail)
+            if not want:
+                continue
+            for n, key in enumerate(self.VOLT_LIMIT_FIELDS):
+                if abs(fields[key] - want[n] / 1000.0) > 1e-6:
+                    off_stock = True
+                    break
+        if off_stock:
             steps.append(ResetStep("rail limits",
                                    self.reset_volt_rail_limits()))
         if self.static.get("pl_def_mw"):

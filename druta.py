@@ -2413,7 +2413,24 @@ class Druta:
         So the clamp is logged by name, with both values."""
         if xoc is None:
             xoc = "xoc" in self.risk_features()
+        was_xoc = self._xoc_bounds
         self._xoc_bounds = bool(xoc)
+        # UNTICKING XOC MUST NOT LEAVE THE CARD ABOVE THE VBIOS CEILING.
+        #
+        # Everything below narrows the widget and moves the slider; none of it
+        # writes the card. For a clock offset that asymmetry is merely untidy
+        # and it is logged. For overvoltage it is not: that limit is the
+        # backstop holding the two ceilings below 1250 mV, so XOC on -> 1250 ->
+        # Apply -> XOC off would leave the rail permitted past the value the
+        # VBIOS set while the panel calmly read 1200, and the next refresh
+        # would put 1250 back on the slider ready to be re-committed.
+        #
+        # "Default headroom past the VBIOS ceiling is exactly zero" has to hold
+        # when the box goes off, not only when it was never ticked, so the
+        # field goes back to stock here. Edge-triggered, because this runs on
+        # state changes and a rail write on every pass would be its own bug.
+        if was_xoc and not xoc:
+            self.drop_ov_to_stock()
         for key, r in self._slider_ranges.items():
             if not dpg.does_item_exist(f"sl_{key}"):
                 continue
@@ -3121,6 +3138,33 @@ class Druta:
         # a ceiling the card no longer had.
         self.refresh_volt_limits()
         self.vf_read(force=True)
+
+    def drop_ov_to_stock(self):
+        """Put any above-stock overvoltage back, on both rails.
+
+        Called when XOC goes off. Only the overvoltage field, and only when it
+        is actually above the power-on value: the two ceilings are left alone
+        because they were never the thing XOC was widening here, and lowering
+        a limit the user set deliberately is its own surprise.
+
+        Goes through reset_volt_rail_limits, which is ungated on purpose, so
+        this still works in the state it exists for - the moment the write
+        permission has just been taken away.
+        """
+        raw = self.gpu.read_volt_rail_limits()
+        if not raw:
+            return
+        for rail, fields in raw.items():
+            cur = GPU.abs_limit_mv(fields, "overvoltage")
+            stock = GPU.stock_limit_mv(rail, "overvoltage")
+            if cur <= stock + 0.5:
+                continue
+            ok, msg = self.gpu.reset_volt_rail_limits(
+                rail=rail, fields=("overvoltage",))
+            self.log(f"XOC off: {'NVVDD' if rail == 0 else 'MSVDD'} "
+                     f"overvoltage was {cur:.0f} mV, above the VBIOS "
+                     f"{stock:.0f} mV. Put back to stock - {msg}", ok)
+        self.refresh_volt_limits()
 
     def refresh_rail_live(self):
         """Put the live rail voltages back on the panel, every tick.
