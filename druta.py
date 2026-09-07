@@ -90,6 +90,7 @@ import dearpygui.dearpygui as dpg
 
 import gpuload
 import profiles
+import startup
 import shuntmod
 import timings
 import timingwrite
@@ -99,6 +100,8 @@ from nvbackend import (GPU, EVENT_REASONS, PERF_DECREASE_BITS, VF_STEP_KHZ,
                        PRIV_CONFIRMED, PRIV_DOMAIN_ID, PRIV_LIKELY,
                        PRIV_N_DOMAINS, PRIV_PCIE_GEN, PRIV_UNNAMED,
                        PRIV_UNPOPULATED)
+
+__version__ = "1.3.0"
 
 # ---- palette (ImGui takes 0-255 RGBA) ------------------------------------- #
 TEXT = (230, 232, 236)
@@ -319,6 +322,10 @@ class Druta:
         # (vf_read, vf_revert), so it can never outlive the edits it describes.
         self._plan_note = None     # None, or {"text": str, "hard": bool}
         self._pending_load = None  # (name, why) awaiting a cross-card confirm
+        self._profile_pending = None  # waiting for fresh I2C verification
+        self._profile_applying = False
+        self._startup_manager = None
+        self._startup_request = None
         # ---- Timings tab (read-only; see the TIMINGS section) ------------- #
         self._tim_lock = threading.Lock()
         self._tim = None           # latest timings.Snapshot
@@ -472,6 +479,11 @@ class Druta:
 
     def guard(self):
         """True if writes are permitted."""
+        if getattr(getattr(self, "_startup_manager", None), "ending", False):
+            return False
+        if getattr(self, "_profile_pending", None):
+            self.log("profile load is waiting for I2C verification", False)
+            return False
         if not self.unlocked():
             self.log("locked - tick 'Unlock controls' first", False)
             return False
@@ -1289,6 +1301,8 @@ class Druta:
         consequence of asking for one number, so the log line reports what was
         written and what it reaches, and the readout keeps showing both fields.
         """
+        if not self.guard():
+            return
         if (dpg.does_item_exist("vlim_link") and dpg.get_value("vlim_link")):
             named = [k for k in self.VLIM_LINKED if k in limits]
             # Only when exactly one of the pair was moved: a call that already
@@ -1372,6 +1386,8 @@ class Druta:
         directly: a second path to the same register is how the button and the
         slider end up disagreeing about what was written.
         """
+        if getattr(self, "_profile_pending", None):
+            return
         if key.startswith("vlim"):
             # ONE field on ONE rail. These share a block, and resetting the
             # block put the other rail back to stock along with it - pressing
@@ -1395,6 +1411,8 @@ class Druta:
             cb(val)
 
     def apply_vlim_reset(self):
+        if getattr(self, "_profile_pending", None):
+            return
         ok, msg = self.gpu.reset_volt_rail_limits()
         self.log(msg, ok)
         self.refresh_volt_limits()
@@ -1697,8 +1715,8 @@ class Druta:
                                  default_value=True,
                                  callback=lambda s, a, u: self.sync_lock_ui())
                 dpg.add_spacer(width=self.s(24))
-                # Both default OFF and neither persists: a session that ends
-                # with the rail bypassed should not silently begin that way.
+                # Default OFF. Only an explicitly loaded profile (or the
+                # user's opt-in startup copy) can restore these modes.
                 dpg.add_checkbox(label="XOC", tag="xoc_mode",
                                  default_value=False,
                                  callback=lambda s, a, u: self.sync_risk_ui())
@@ -2473,7 +2491,7 @@ class Druta:
         stock' stays live on purpose - it only ever moves toward stock; 'Reset
         curve to stock' is a whole-table write that also discards staged
         edits, so it is gated with the rest."""
-        on = self.unlocked()
+        on = self.unlocked() and not getattr(self, "_profile_pending", None)
         fan_caps = self.gpu.fan_capabilities()
         fan_manual = fan_caps["manual"]
         fan_auto = fan_caps["auto"]
@@ -2625,16 +2643,16 @@ class Druta:
             res["v"] = out.get("result")
         except Exception as e:                                  # noqa: BLE001
             res["err"] = f"{type(e).__name__}: {e}"
-        finally:
-            self._i2c_busy = False
         v = res.get("v")
         if v is None:
             self.log("verify: the load never settled, so nothing was measured"
                      + (f" ({res['err']})" if res.get("err") else ""), False)
+            self._i2c_busy = False
             return
         ok, msg, _ladder = v
-        self._i2c_verified = bool(ok)
+        self._i2c_verified = bool(ok) and self.gpu is gpu and self.rail is rail
         self.log("verify: " + msg, ok)
+        self._i2c_busy = False  # publish completion AFTER the result
 
     def apply_i2c_rail(self, v):
         # Ordered so the cheap refusals happen before any bus traffic, and so
@@ -3076,6 +3094,9 @@ class Druta:
         offsets, voltage boost, power limit, fan and every delta - and
         unlike Apply there is no single thing on screen whose consequence a
         banner could state, because it undoes every knob on the tab."""
+        if getattr(self, "_profile_pending", None):
+            self.log("wait for I2C/profile loading to finish before resetting", False)
+            return
         if not self._reset_armed:
             self._reset_armed = True
             self.log("this zeroes offsets + voltage boost, restores the default "
@@ -5283,7 +5304,7 @@ class Druta:
         duplicated prose, and the two copies had already drifted apart."""
         st = self.gpu.static
         cr, mr = st.get("core_off_range"), st.get("mem_off_range")
-        return f"""Druta - device report
+        return f"""Druta {__version__} - device report
 
 Device : {st.get('name')}
 Driver : {st.get('driver')}     VBIOS : {st.get('vbios')}
@@ -5344,7 +5365,7 @@ deliberately does not put behind a button."""
         failure. It says so as an error instead, which reddens the V/F tab's
         status line as well as the log."""
         try:
-            name, _path, missing = profiles.autosave(self.gpu, action)
+            name, _path, missing = profiles.autosave(self.gpu, action, getattr(self, "rail", None))
         except Exception as e:
             self.log(f"could NOT save an undo point before {action}: {e} - "
                      f"the write is going ahead unprotected", False)
@@ -5371,7 +5392,7 @@ deliberately does not put behind a button."""
             self.log("give the profile a name first", False)
             return
         try:
-            state = profiles.capture(self.gpu)
+            state = profiles.capture(self.gpu, self.rail)
             path = profiles.save(name, state)
         except Exception as e:
             self.log(f"save profile '{name}': {e}", False)
@@ -5397,8 +5418,8 @@ deliberately does not put behind a button."""
     # header / width in UNSCALED px, same shape as DOM_COLS. 'contents' is the
     # widest because summarize() is what tells one autosave from another - the
     # names are all timestamps.
-    PROF_COLS = (("profile", 300), ("saved", 175), ("contents", 470),
-                 ("", 90))
+    PROF_COLS = (("profile", 240), ("saved", 160), ("contents", 470),
+                 ("", 150))
     # tag prefix for the per-row Load buttons. They are built and destroyed on
     # every refresh, so they need a predictable name to be pruned OUT of
     # _ctl_widgets again - see refresh_profile_list.
@@ -5410,6 +5431,25 @@ deliberately does not put behind a button."""
         re-added here rather than only at build time."""
         if not dpg.does_item_exist("prof_table"):
             return
+        viewport_w = dpg.get_viewport_client_width()
+        viewport_h = dpg.get_viewport_client_height()
+        width = min(self.s(1080), max(400, viewport_w - self.s(40))) if viewport_w else self.s(1080)
+        height = min(self.s(560), max(300, viewport_h - self.s(40))) if viewport_h else self.s(560)
+        dpg.configure_item("win_profiles", width=width, height=height,
+                           pos=[self.s(20), self.s(20)])
+        factor = (width - self.s(40)) / self.s(sum(w for _, w in self.PROF_COLS) + 40)
+        columns = [(label, max(1, int(self.s(w) * factor))) for label, w in self.PROF_COLS]
+        for tag in ("prof_load_note", "prof_startup_note", "prof_startup_status", "prof_warn"):
+            if dpg.does_item_exist(tag):
+                dpg.configure_item(tag, wrap=width - self.s(40))
+        manager = getattr(self, "_startup_manager", None)
+        config = (manager.config or {}) if manager else {}
+        if dpg.does_item_exist("prof_startup_status"):
+            status = (f"Windows sign-in profile: {config.get('name')} (saved copy)"
+                      if config.get("enabled") else "Windows sign-in profile: off")
+            if manager and manager.reason:
+                status += ". " + manager.reason
+            dpg.set_value("prof_startup_status", status)
         # a pending cross-card confirmation is keyed to one row; rebuilding the
         # rows out from under it would leave the warning pointing at nothing
         self.set_pending_load(None)
@@ -5418,10 +5458,10 @@ deliberately does not put behind a button."""
         self._ctl_widgets = [t for t in self._ctl_widgets
                              if not str(t).startswith(self.PROF_LOAD_TAG)]
         dpg.delete_item("prof_table", children_only=True)
-        for label, w in self.PROF_COLS:
+        for label, w in columns:
             dpg.add_table_column(label=label, parent="prof_table",
                                  width_fixed=True,
-                                 init_width_or_weight=self.s(w))
+                                 init_width_or_weight=w)
         try:
             rows = profiles.list_profiles()
         except Exception as e:
@@ -5442,17 +5482,22 @@ deliberately does not put behind a button."""
                 # chose to keep, so they are dimmed - a hand-named profile has
                 # to stand out in a list that is mostly machine-made
                 dpg.add_text(name, color=DIM if is_auto else TEXT,
-                             wrap=self.s(self.PROF_COLS[0][1] - 10))
+                             wrap=columns[0][1] - self.s(10))
                 dpg.add_text(when or "?", color=DIM)
                 dpg.add_text(summary, color=TEXT if state else BAD,
-                             wrap=self.s(self.PROF_COLS[2][1] - 10))
+                             wrap=columns[2][1] - self.s(10))
                 if state is None:
                     dpg.add_text("--", color=DIM)
                 else:
                     tag = f"{self.PROF_LOAD_TAG}{row_i}"
-                    dpg.add_button(label="Load", tag=tag, width=-1,
-                                   user_data=name,
-                                   callback=lambda s, a, u: self.load_profile(u))
+                    with dpg.group():
+                        dpg.add_button(label="Load", tag=tag, width=-1,
+                                       user_data=name,
+                                       callback=lambda s, a, u: self.load_profile(u))
+                        if not is_auto:
+                            dpg.add_button(label="Load at startup", width=-1,
+                                           user_data=name,
+                                           callback=lambda s, a, u: self.set_startup_profile(u))
                     self._ctl_widgets.append(tag)
         # the rows were just created, so they are born ignoring the gate - one
         # pass puts every write control, new and old, back in step with it
@@ -5490,6 +5535,10 @@ deliberately does not put behind a button."""
         except Exception as e:
             self.log(f"load '{name}': {e}", False)
             return
+        error = profiles.preflight(self.gpu, state, self.rail)
+        if error:
+            self.profile_failure(error)
+            return
         warn = profiles.device_mismatch(state, self.gpu)
         if warn and (self._pending_load or (None,))[0] != name:
             self.set_pending_load((name, warn))
@@ -5497,17 +5546,139 @@ deliberately does not put behind a button."""
                      f"Profiles > Load profile before this is restored", False)
             return
         self.set_pending_load(None)
-        # the action label is bounded: undoing an undo would otherwise compose
+        self.begin_profile_load(name, state)
+
+    def begin_profile_load(self, name, state, automatic=False):
+        if not self.guard() or self._i2c_busy:
+            self.profile_failure("profile load blocked by another operation or locked controls", automatic)
+            return
+        error = profiles.preflight(self.gpu, state, self.rail)
+        if automatic:
+            error = error or profiles.strict_device_error(state, self.gpu)
+            if profiles.incomplete(state):
+                error = error or "startup profile is incomplete; save a fresh profile"
+        if error:
+            self.profile_failure(error, automatic)
+            return
+        # The action label is bounded: undoing an undo would otherwise compose
         # 'load-autosave-load-autosave-...' into a filename that only grows
-        self.autosave_before(f"load-{name}"[:40])
+        captured = self.autosave_before(f"load-{name}"[:40])
+        if automatic and not captured:
+            self.profile_failure("could not capture a complete undo point", automatic)
+            return
         self.log(f"restoring '{name}' ({state.get('saved_at','?')}): "
                  f"{profiles.summarize(state)}", None)
-        for ok, msg in profiles.restore(self.gpu, state):
+        if state.get("schema", 1) >= 2:
+            for tag, value in (("xoc_mode", bool(state.get("xoc"))),
+                               ("vlim_mode", bool(state.get("rail_limits_mv"))),
+                               ("i2c_mode", bool(state.get("i2c")))):
+                dpg.set_value(tag, value)
+            self.sync_risk_ui()
+        if state.get("i2c") and not self._i2c_verified:
+            self.verify_i2c_rail()
+            if not self._i2c_busy and not self._i2c_verified:
+                self.profile_failure("I2C verification could not start", automatic)
+                return
+            self._profile_pending = (name, state, automatic)
+            self.sync_lock_ui()
+            for tag in ("unlock", "xoc_mode", "i2c_mode", "vlim_mode"):
+                dpg.configure_item(tag, enabled=False)
+            self.log("profile waits for fresh I2C verification under load", None)
+            return
+        self.finish_profile_load(name, state, automatic)
+
+    def poll_profile_load(self):
+        pending = self._profile_pending
+        if not pending or self._i2c_busy:
+            return
+        self._profile_pending = None
+        self.sync_lock_ui()
+        for tag in ("unlock", "xoc_mode", "i2c_mode", "vlim_mode"):
+            dpg.configure_item(tag, enabled=True)
+        name, state, automatic = pending
+        if not self._i2c_verified:
+            self.profile_failure("I2C verification failed; profile was not applied", automatic)
+            return
+        self.finish_profile_load(name, state, automatic)
+
+    def profile_failure(self, reason, automatic=False):
+        self.log("profile not fully applied: " + reason, False)
+        manager = getattr(self, "_startup_manager", None)
+        if automatic and manager:
+            manager.block(reason)
+        self.refresh_profile_list()
+
+    def finish_profile_load(self, name, state, automatic=False):
+        self._profile_applying = True
+        try:
+            results = profiles.restore(self.gpu, state, rail=self.rail,
+                                       i2c_verified=self._i2c_verified)
+        except Exception as e:
+            results = [(False, f"profile restore failed: {e}")]
+        finally:
+            self._profile_applying = False
+        for ok, msg in results:
             self.log(msg, ok)
+        if any(not ok for ok, _ in results):
+            self.profile_failure("one or more settings failed; see the per-control results", automatic)
+        else:
+            self.log(f"profile '{name}' applied", True)
         self.sync_sliders_from_gpu(state)
+        self.sync_profile_rail_sliders()
+        self.refresh_volt_limits()
         # the delta table is written LAST and wins over the core offset (see
         # profiles.restore) - rebase the editor on what is now in the card
         self.vf_read(force=True)
+
+    def sync_profile_rail_sliders(self):
+        """Use fresh requests after restore, including a partially failed load."""
+        try:
+            values = {"rail": self.gpu.read_rail_offset_mv(0)}
+            domains, _ = self.gpu.read_clk_domain_offsets()
+            for knob in self.DOMAIN_KNOBS:
+                if knob.ctrl in (domains or {}):
+                    values[knob.key] = domains[knob.ctrl]["freq_khz"] / 1000
+            if self.rail:
+                values["i2crail"] = self.rail.telemetry().get("offset_mv")
+            for key, value in values.items():
+                if value is not None:
+                    for prefix in ("sl_", "in_"):
+                        if dpg.does_item_exist(prefix + key):
+                            dpg.set_value(prefix + key, int(round(value)))
+        except Exception as e:
+            self.log(f"rail/clock sliders could not be refreshed: {e}", False)
+
+    def set_startup_profile(self, name):
+        """Selecting this action approves the displayed tune for Windows logon."""
+        if not self.guard():
+            return
+        try:
+            if not is_admin():
+                raise ValueError("run Druta as administrator to register its sign-in task")
+            manager = self._startup_manager
+            if manager is None:
+                raise ValueError("startup manager is unavailable")
+            state = profiles.load(name)
+            error = profiles.preflight(self.gpu, state, self.rail)
+            error = error or profiles.strict_device_error(state, self.gpu)
+            if error:
+                raise ValueError(error)
+            if profiles.incomplete(state) or state.get("schema", 1) < 2:
+                raise ValueError("save a new, complete profile before enabling startup")
+            manager.enable(name, state)
+            self.log(f"'{name}' will load at Windows sign-in after a clean shutdown. "
+                     "Its saved rail/XOC settings are included; I2C is reverified under load.", True)
+        except Exception as e:
+            self.log(f"startup profile: {e}", False)
+        self.refresh_profile_list()
+
+    def disable_startup_profile(self):
+        try:
+            self._startup_manager.disable()
+            self.log("Windows sign-in profile disabled", True)
+        except Exception as e:
+            self.log(f"disable startup profile: {e}", False)
+        self.refresh_profile_list()
 
     def undo_last_write(self):
         """Restore the snapshot taken just before the most recent covered write
@@ -5829,10 +6000,11 @@ deliberately does not put behind a button."""
             self.bind("info", "mono")
 
         with dpg.window(label="Save profile", tag="win_save", show=False,
-                        width=self.s(560), height=self.s(210),
+                        width=self.s(560), height=self.s(270),
                         pos=[self.s(200), self.s(180)]):
-            dpg.add_text("Snapshots both offsets, the power limit, the voltage "
-                         "boost, the fan POLICY (not just its duty) and all "
+            dpg.add_text("Snapshots clock offsets, power, voltage boost, fan policy, "
+                         "confirmed per-rail limits, NVVDD offset, the I2C regulator "
+                         "offset and XOC mode, plus all "
                          f"{self.n_vf_rows()} V/F deltas, as JSON in profiles/ "
                          "next to the app. Saving writes nothing to the GPU.",
                          color=DIM, wrap=self.s(520))
@@ -5856,18 +6028,24 @@ deliberately does not put behind a button."""
         with dpg.window(label="Profiles", tag="win_profiles", show=False,
                         width=self.s(1080), height=self.s(560),
                         pos=[self.s(90), self.s(90)]):
-            dpg.add_text("Loading is a destructive write: it sets the power "
-                         "limit, voltage boost, both offsets and the fan "
-                         "policy, then the whole delta table LAST - which wins "
-                         "over the core offset, because they are the same "
-                         f"{self.n_vf_rows()} driver rows. An undo point is taken "
-                         "first, and every knob reports into the Control tab "
-                         "log.", color=WARN, wrap=self.s(1040))
+            dpg.add_text("Load restores saved rail limits, voltage/clock offsets, "
+                         "I2C offset and XOC mode, power, voltage boost, fan policy "
+                         "and the V/F table. An undo point is taken first. I2C is "
+                         "verified under load. Every control reports its result "
+                         "in the Control log.", tag="prof_load_note", color=WARN, wrap=self.s(1040))
+            dpg.add_text("Load at startup keeps a copy and launches Druta at Windows "
+                         "sign-in. An abnormal Windows/Druta shutdown or unknown "
+                         "shutdown status skips loading for that boot. Selecting "
+                         "it again updates the saved startup copy.",
+                         tag="prof_startup_note", color=DIM, wrap=self.s(1040))
+            dpg.add_text("", tag="prof_startup_status", color=WARN, wrap=self.s(1040))
             with dpg.group(horizontal=True):
                 dpg.add_button(label="Refresh", width=self.s(130),
                                callback=self.refresh_profile_list)
                 dpg.add_button(label="Save profile...", width=self.s(170),
                                callback=self.open_save_profile)
+                dpg.add_button(label="Disable startup loading", width=self.s(210),
+                               callback=self.disable_startup_profile)
             dpg.add_text("", tag="prof_warn", color=BAD, show=False,
                          wrap=self.s(1040))
             dpg.add_separator()
@@ -6106,7 +6284,7 @@ deliberately does not put behind a button."""
         with dpg.window(label="About Druta", tag="win_about", show=False,
                         width=self.s(620), height=self.s(430),
                         pos=[self.s(180), self.s(160)]):
-            dpg.add_text("Thermetery Druta", color=ACCENT)
+            dpg.add_text(f"Thermetery Druta {__version__}", color=ACCENT)
             dpg.add_text("Copyright (C) 2026 Thermetery Technology Co Limited")
             dpg.add_text(
                 "This program comes with ABSOLUTELY NO WARRANTY. It is free "
@@ -6859,6 +7037,9 @@ deliberately does not put behind a button."""
         than by blocking, because an induce can hold the card for 25 s and
         refusing to switch for that long would be worse than dropping its
         result."""
+        if getattr(self, "_profile_pending", None) or getattr(self, "_i2c_busy", False):
+            self.log("wait for I2C/profile loading to finish before switching cards", False)
+            return False
         old = self.gpu.static.get("name", "?")
         # Opening a missing/reset card may fail or raise. Keep the current
         # curve, edits, and worker generation intact until it is usable.
@@ -6887,7 +7068,7 @@ deliberately does not put behind a button."""
             self._rebuilding = False
         st = self.gpu.static
         if len(self.gpu_list) > 1:
-            dpg.set_viewport_title(f"Thermetery Druta  -  {st.get('name')}  "
+            dpg.set_viewport_title(f"Thermetery Druta {__version__}  -  {st.get('name')}  "
                                    f"{self.gpu.slot()}")
         self.repaint_log()
         self.relayout()
@@ -8061,7 +8242,7 @@ deliberately does not put behind a button."""
         root's other children."""
         st = self.gpu.static
         with dpg.group(horizontal=True, tag="hdr_row", parent="root"):
-            dpg.add_text("Thermetery Druta", tag="hdr", color=ACCENT)
+            dpg.add_text(f"Thermetery Druta {__version__}", tag="hdr", color=ACCENT)
             self.bind("hdr", "big")
             dpg.add_text(f"   {st.get('name')}  •  driver "
                          f"{st.get('driver')}  •  vbios "
@@ -8138,7 +8319,7 @@ deliberately does not put behind a button."""
         # The card is in the TITLE, not only inside the window: two Drutas open
         # on two cards are otherwise identical in the taskbar, and picking the
         # wrong one is picking the wrong GPU to write to.
-        title = "Thermetery Druta"
+        title = f"Thermetery Druta {__version__}"
         if len(self.gpu_list) > 1:
             title += f"  -  {self.gpu.static.get('name')}  {self.gpu.slot()}"
         # Wide enough for the Control tab's two columns: each is the knob
@@ -8180,6 +8361,11 @@ deliberately does not put behind a button."""
         self.timings_capture()
 
         last = 0.0
+        if self._startup_request:
+            request, self._startup_request = self._startup_request, None
+            self.begin_profile_load(request["name"], request["profile"], automatic=True)
+        elif self._startup_manager and self._startup_manager.reason:
+            self.log("startup profile skipped: " + self._startup_manager.reason, False)
         # try/finally, not a bare loop: the tail below is what stops this app
         # leaving the card pinned, and the lock is the ONE write that outlives
         # the process unread. Anything the loop raises - a DPG call on a
@@ -8188,6 +8374,9 @@ deliberately does not put behind a button."""
         # keeps the promise even when one of them is missing.
         try:
             while dpg.is_dearpygui_running():
+                if self._startup_manager and self._startup_manager.ending:
+                    break
+                self.poll_profile_load()
                 now = time.perf_counter()
                 if now - last >= 0.25:
                     last = now
@@ -8280,8 +8469,12 @@ def main(argv=None):
     at one card with one copied string."""
     argv = list(sys.argv[1:] if argv is None else argv)
     slot = None
+    automatic = False
     while argv:
         a = argv.pop(0)
+        if a in ("--version", "-V"):
+            _tell(f"Druta {__version__}")
+            return 0
         if a in ("--list-gpus", "-l"):
             found = enumerate_gpus()
             if not found:
@@ -8292,30 +8485,56 @@ def main(argv=None):
                 + ("" if g["has_nvapi"] else "   (no NVAPI handle)")
                 for g in found))
             return 0
-        if a in ("--gpu", "-d"):
+        if a == "--startup-profile":
+            automatic = True
+        elif a in ("--gpu", "-d"):
             if not argv:
                 _tell("--gpu needs a PCI slot, e.g. --gpu 0000:01:00.0")
                 return 2
             slot = argv.pop(0)
         elif a in ("-h", "--help"):
-            _tell("usage: Druta [--gpu SLOT] [--list-gpus]\n\n"
+            _tell("usage: Druta [--gpu SLOT] [--list-gpus] [--startup-profile]\n\n"
                   "  --gpu SLOT   open on that card, e.g. 0000:02:00.0\n"
                   "  --list-gpus  print the slot and name of every card\n\n"
+                  "  --version    print the Druta version\n\n"
+                  "  --startup-profile  apply the opted-in sign-in profile after shutdown checks\n\n"
                   "With no --gpu, Druta opens on the lowest PCI slot.\n"
                   "Device > Card switches cards in a running window.")
             return 0
         else:
             _tell(f"unknown argument {a!r} (try --help)")
             return 2
-    app = Druta(slot)
-    if not app.gpu.available():
-        _tell("No GPU backend: " + app.gpu.status_line()
-              + ("\n\ncards present:\n" + "\n".join(
-                  f"  {g['slot']}  {g['name']}" for g in app.gpu_list)
-                 if app.gpu_list else ""))
-        return 1
-    app.run()
-    return 0
+    manager = startup.Startup()
+    request = manager.begin(automatic=automatic)
+    clean = False
+    try:
+        if automatic and manager.lock is None:
+            return 0  # another window is already tracking this session
+        if request:
+            if not is_admin():
+                manager.block("startup profile requires administrator rights")
+                request = None
+            else:
+                slot = request["profile"]["device"].get("slot")
+        app = Druta(slot)
+        app._startup_manager, app._startup_request = manager, request
+        try:
+            manager.watch_shutdown(lambda: not (app._i2c_busy or app._profile_pending
+                                                or app._profile_applying))
+        except Exception as e:
+            manager.block(str(e))
+            app._startup_request = None
+        if not app.gpu.available():
+            _tell("No GPU backend: " + app.gpu.status_line()
+                  + ("\n\ncards present:\n" + "\n".join(
+                      f"  {g['slot']}  {g['name']}" for g in app.gpu_list)
+                     if app.gpu_list else ""))
+            return 1
+        app.run()
+        clean = not (app._i2c_busy or app._profile_pending or app._profile_applying)
+        return 0
+    finally:
+        manager.close(clean=clean)
 
 
 if __name__ == "__main__":
