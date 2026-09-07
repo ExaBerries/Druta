@@ -68,6 +68,7 @@ function Get-SourceSnapshot {
         'experiments/kepler-validation-47212.json',
         'experiments/kepler-timing-writes-47212.json',
         'experiments/kepler-timing-sweep-47212.json',
+        'experiments/kepler-ncp4206-identity-47212.json',
         'tools/i2c_discover.py', 'tools/probe_volt_rails.py'
     )
     # Only the explicitly public measurement files above are included

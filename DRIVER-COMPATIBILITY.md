@@ -1,28 +1,30 @@
 # Driver compatibility: 472.12 and 580.97
 
-This matrix tracks the local TITAN RTX (TU102, VBIOS 90.02.1E.00.02) and
-TITAN Xp (GP102, VBIOS 86.02.3D.00.01) on Windows. Results are scoped to
+This matrix tracks the local TITAN RTX (TU102, VBIOS 90.02.1E.00.02),
+TITAN Xp (GP102, VBIOS 86.02.3D.00.01), and GTX 770 (GK104, VBIOS
+80.04.c3.00.01, PCI 1184 / subsystem 1033196e) on Windows. Results are scoped to
 these boards and drivers. Blackwell's existing 580.97 controls are separate;
-this comparison does not establish a 472.12 Blackwell path.
+this comparison does not establish a 472.12 Blackwell path. The 580.97 baseline
+column describes the TITAN boards; GTX 770 was tested only on 472.12.
 
-| Feature | 580.97 baseline | TITAN RTX on 472.12 | TITAN Xp on 472.12 |
-|---|---|---|---|
-| NVML loading and GPU identity | Confirmed | Confirmed; Standard-driver NVSMI directory supported | Confirmed; selected by PCI slot |
-| Core offset and range | Confirmed through NVML | Confirmed through NVAPI Pstates20 | Confirmed through NVAPI Pstates20 |
-| Ordinary memory offset and range | Confirmed through NVML | Confirmed; same true-MHz slider units | Confirmed; same true-MHz slider units |
-| Applied-offset and P0 maximum-clock telemetry | Confirmed through NVML | Confirmed through NVAPI Pstates20 | Confirmed through NVAPI Pstates20 |
-| V/F point lock | Confirmed | Confirmed during loaded offset checks; exact lock restored | Confirmed during loaded offset checks; exact lock restored |
-| Fan duty, RPM, manual control and Auto | Confirmed | Both fan controls' requested levels and Auto policies verified through NVAPI; zero RPM is expected on this water-cooled card | Manual duty/RPM response and Auto verified through NVAPI cooler controls |
-| Clock event/performance-limit reasons | Confirmed | Legacy NVML ThrottleReasons fallback implemented | Legacy NVML ThrottleReasons fallback implemented |
-| V/F curve editing and de-flatten planners | Confirmed | Negative-point write/reset and raised-cap de-flatten confirmed | Negative-point write/reset and raised-cap de-flatten confirmed; the regular ramp no longer treats the stock clock-list maximum as an overclock ceiling |
-| NVVDD rail offsets and all four limits | Confirmed; see voltage measurements below | Confirmed, including each live ceiling clamp and idle floor | Confirmed, including each live ceiling clamp; floor uses verified legacy re-send |
-| Per-domain clock offsets | Confirmed for mapped controls | XBAR, Additional Memory Clock Offset, SYS, VIDEO and LTC each moved by about +30 MHz under load | Additional Memory Clock Offset +25 MHz moved reported memory by +20.25 MHz twice; other paired controls remain hidden |
-| Power limit and voltage boost | Confirmed | Confirmed with independent readback | Confirmed with independent readback |
-| NVML frequency lock | Works on Turing; unsupported on Pascal | Confirmed at 1500 MHz under load; legacy RM readback also sees another process's range | Unsupported baseline; V/F point lock remains available |
-| Profiles, Undo, Reset all and Max it | Existing composite actions | All 13 UI callback checks passed; exact controls/table/lock restoration | All 13 UI callback checks passed; exact controls/table/lock restoration |
-| I2C regulator control | Board/tool dependent | MP2888A verified under load: +75 mV request moved rail-minus-VID by +45 mV; original raw value restored | No matching regulator found on this board |
-| Memory timing capture and writes | Board/tool dependent | Capture works; FAW 16→17 is dropped by hardware and reported as dropped | Capture, FAW 24→25 write, and exact restore confirmed |
-| MSVDD | Unavailable on these TITAN boards | Unavailable; no confirmed rail | Unavailable; no confirmed rail |
+| Feature | 580.97 baseline | TITAN RTX on 472.12 | TITAN Xp on 472.12 | GTX 770 on 472.12 |
+|---|---|---|---|---|
+| NVML loading and GPU identity | Confirmed | Confirmed; Standard-driver NVSMI directory supported | Confirmed; selected by PCI slot | Confirmed; NVAPI/NVML agree on PCI identity |
+| Core offset and range | Confirmed through NVML | Confirmed through NVAPI Pstates20 | Confirmed through NVAPI Pstates20 | Confirmed through NVAPI Pstates20; repeated load/restore cycles |
+| Ordinary memory offset and range | Confirmed through NVML | Confirmed; same true-MHz slider units | Confirmed; same true-MHz slider units | Confirmed; +25 true MHz moved reported memory 3505 → 3557 MHz |
+| Applied-offset and P0 maximum-clock telemetry | Confirmed through NVML | Confirmed through NVAPI Pstates20 | Confirmed through NVAPI Pstates20 | Confirmed through NVAPI Pstates20 |
+| V/F point lock | Confirmed | Confirmed during loaded offset checks; exact lock restored | Confirmed during loaded offset checks; exact lock restored | Unavailable through the current V/F path |
+| Fan duty, RPM, manual control and Auto | Confirmed | Both fan controls' requested levels and Auto policies verified through NVAPI; zero RPM is expected on this water-cooled card | Manual duty/RPM response and Auto verified through NVAPI cooler controls | Manual 50%, RPM response and exact Auto-policy restoration confirmed |
+| Clock event/performance-limit reasons | Confirmed | Legacy NVML ThrottleReasons fallback implemented | Legacy NVML ThrottleReasons fallback implemented | NVAPI performance-decrease reasons readable |
+| V/F curve editing and de-flatten planners | Confirmed | Negative-point write/reset and raised-cap de-flatten confirmed | Negative-point write/reset and raised-cap de-flatten confirmed; the regular ramp no longer treats the stock clock-list maximum as an overclock ceiling | No supported V/F table; regular/limited de-flatten unavailable; switching back restores RTX’s 128 points |
+| NVVDD rail offsets and all four limits | Confirmed; see voltage measurements below | Confirmed, including each live ceiling clamp and idle floor | Confirmed, including each live ceiling clamp; floor uses verified legacy re-send | Private layout unvalidated; controls blocked |
+| Per-domain clock offsets | Confirmed for mapped controls | XBAR, Additional Memory Clock Offset, SYS, VIDEO and LTC each moved by about +30 MHz under load | Additional Memory Clock Offset +25 MHz moved reported memory by +20.25 MHz twice; other paired controls remain hidden | Unvalidated; private controls hidden, including Additional Memory Clock Offset |
+| Power limit and voltage boost | Confirmed | Confirmed with independent readback | Confirmed with independent readback | NVML power-limit range and voltage-boost getter unavailable; sliders hidden |
+| NVML frequency lock | Works on Turing; unsupported on Pascal | Confirmed at 1500 MHz under load; legacy RM readback also sees another process's range | Unsupported baseline; V/F point lock remains available | GPU 1176..1176 MHz and memory 3505..3505 MHz both return Not Supported (3), while elevated |
+| Profiles, Undo, Reset all and Max it | Existing composite actions | All 13 UI callback checks passed; exact controls/table/lock restoration | All 13 UI callback checks passed; exact controls/table/lock restoration | Core/memory/fan profile restore verified with apply_curve=False; full profile incomplete; Max it refuses before writes without a curve |
+| I2C regulator control | Board/tool dependent | MP2888A verified under load: +75 mV request moved rail-minus-VID by +45 mV; original raw value restored | No matching regulator found on this board | 0x20 on NVAPI port 2 responds with manufacturer 0x41; NCP4206 candidate, no validated write profile yet |
+| Memory timing capture and writes | Board/tool dependent | Capture works; FAW 16→17 is dropped by hardware and reported as dropped | Capture, FAW 24→25 write, and exact restore confirmed | Capture and 15 delay fields verified; exact restoration; CL 18→19 triggered driver recovery (details below) |
+| MSVDD | Unavailable on these TITAN boards | Unavailable; no confirmed rail | Unavailable; no confirmed rail | No confirmed rail |
 
 Export presence or a successful write return alone is not a functional result. Manual targets
 and Auto policies were verified and restored on both fan channels.
@@ -45,8 +47,9 @@ the true-memory-MHz slider retain their meaning across drivers.
 |---|---:|---:|---:|---:|
 | TITAN RTX | -1000..+1000 MHz | -1000..+3000 | -2000..+6000 | -250..+750 |
 | TITAN Xp | -200..+1200 MHz | -1000..+1000 | -2000..+2000 | -250..+250 |
+| GTX 770 | -105..+1001 MHz | -2695..+3505 | -5390..+7010 | -1347.5..+1752.5 |
 
-The 472.12 checks held a 900 mV V/F point under a CUDA bandwidth workload
+The TITAN 472.12 checks held a 900 mV V/F point under a CUDA bandwidth workload
 targeted by PCI slot. These are short functional measurements, with memory
 requests subject to the card's clock quantization.
 
@@ -56,14 +59,25 @@ requests subject to the card's clock quantization.
 | TITAN RTX | Memory +10 true MHz | 6801 → 6840 MHz, approximately +9.75 true MHz | 7001 → 7041 MHz |
 | TITAN Xp | Core +13 MHz | 1721 → 1733 MHz | 1911 → 1923 MHz |
 | TITAN Xp | Memory +10 true MHz | 5508 → 5544 MHz, approximately +9 true MHz | 5705 → 5745 MHz |
+| GTX 770 | Core +26 MHz, snapped request +27 | 1175 → 1201 MHz | Not separately recorded |
+| GTX 770 | Memory +25 true MHz | 3505 → 3557 MHz, approximately +26 true MHz | Not separately recorded |
 
-Each test first checked identity writes. Complete raw Pstates, V/F-table,
+The TITAN tests first checked identity writes. Complete raw Pstates, V/F-table,
 and lock buffers matched the originals after restoration. Independent
 physical-clock counters also responded. The RTX captures additionally verify
 that other-domain offset fields and all P-state voltage fields stayed unchanged.
 
+On GTX 770, two load/restore cycles returned both offsets to zero. The mixed
+clock-list regimes require deriving the boost grid from the contiguous upper
+regime: 13.049 MHz, rather than the incorrect whole-list average of 5.523 MHz.
+The tests use short workloads and do not establish maximum stable overclocks.
+
 The local EXE/source package includes the raw measurements:
 
+- [GTX 770 functional checks](experiments/kepler-validation-47212.json)
+- [GTX 770 FAW verification](experiments/kepler-timing-writes-47212.json)
+- [GTX 770 timing sweep and clock-lock attempts](experiments/kepler-timing-sweep-47212.json)
+- [GTX 770 I2C identity reads](experiments/kepler-ncp4206-identity-47212.json)
 - [TITAN RTX offset measurements](experiments/legacy-offsets-47212-0000-01-00.0.json)
 - [TITAN Xp offset measurements](experiments/legacy-offsets-47212-0000-02-00.0.json)
 - [580.97 voltage measurements](experiments/voltage-rails-20260906.json), explained in [VOLTAGE-RAILS-TITAN.md](VOLTAGE-RAILS-TITAN.md)
@@ -86,7 +100,15 @@ Reset restored the original RM records, NVAPI lock, V/F table, and Pstates
 byte for byte. The package includes the
 [production frequency-lock measurements](experiments/legacy-frequency-production-47212.json).
 
-Both cards on 472.12 reached 1112.5 mV with raised 1125 mV ceilings in two
+On GTX 770, `nvmlDeviceSetGpuLockedClocks(1176, 1176)` and
+`nvmlDeviceSetMemoryLockedClocks(3505, 3505)` both return Not Supported (3),
+even as administrator. Application-clock and default-application-clock getters
+also return Not Supported for graphics and memory; their setters were not
+tested. A checked CUDA workload maintained P0/3505 MHz around timing writes;
+this was not an enforced P-state lock. These results concern the tested APIs,
+not every possible Kepler P-state-control mechanism.
+
+Both TITAN cards on 472.12 reached 1112.5 mV with raised 1125 mV ceilings in two
 raise/restore cycles. NVVDD +12.5 mV offsets moved the live voltage by
 12.5 mV, and each ceiling independently clamped live voltage to 875 mV.
 The idle floor also reached 875 mV and returned to its original value;
@@ -104,7 +126,11 @@ still be clipped in the evaluated curve by the driver's hardware ceiling.
 The staging and apply results report those cases, and a default Pascal ramp
 with no room for a whole clock bin reports no applicable change.
 
-The local UI callback checks exercised Max it, its single Undo action,
+GTX 770 profiles restore core/memory offsets and fan policy with
+`apply_curve=False`. A full profile remains incomplete without a V/F table;
+Windows sign-in profile application was not tested on that board.
+
+The TITAN UI callback checks exercised Max it, its single Undo action,
 named-profile restoration, and Reset all on each card. All 13 checks per
 card passed, and the original profile controls, raw V/F table, and lock
 buffer were restored exactly. On RTX, the ramp has 19 points from 975 to
@@ -142,112 +168,60 @@ curves without disappearing curves or leaked GUI items. A clean curve
 switches immediately; actual staged edits require the existing confirmation.
 If the new GPU cannot initialize, the previous curve and edits remain intact.
 
-## GTX 770 / Kepler, driver 472.12
 
-Verified on PCI device 1184, subsystem 1033196e, VBIOS 80.04.c3.00.01.
-The GTX 770 occupies 0000:02:00.0; the TITAN RTX remains at 0000:01:00.0.
-Machine-readable results: `experiments/kepler-validation-47212.json`.
+GTX 770 switching likewise clears its unavailable curve and restores all 128
+RTX points on return. No private Kepler clock or voltage write was attempted.
 
-- NVAPI and NVML identify the same card. Temperature, clocks, utilization,
-  fan duty/RPM and relative power telemetry read successfully. Absolute watts
-  and a writable NVML power-limit range are unavailable through the current backend.
-- Two repeated load/restore cycles: a +26 MHz core request is snapped to
-  +27 MHz and moves the measured core from 1175 to 1201 MHz. A +25 true MHz
-  memory request moves the driver's reported memory clock from 3505 to
-  3557 MHz. Both return to baseline after restoring zero offsets.
-- Manual fan 50% and restoration to automatic policy work. The original
-  automatic duty settles back to 26%; duty during spin-down is not a stored
-  manual request. Tests stayed below 46 degrees C.
-- Profile restore with `apply_curve=False` restores core, memory and fan policy.
-  A full profile is still marked incomplete because no V/F table was captured;
-  automatic Windows sign-in application was not enabled or tested on this card.
-- Repeated RTX -> GTX 770 -> RTX switching recovers all 128 RTX curve points.
-  The Kepler V/F getter reports unavailable, not a fabricated zero-frequency point.
-- nvtune timing capture succeeds with 33 decoded fields and stable 3505 MHz
-  memory around the capture. FAW writes were then verified in two cycles of
-  32 -> 33 -> 32 under P0 load. CONFIG3 at 0x10F29C changed only the FAW bits;
-  the broadcast aperture and all four partitions held the requested value.
-  Each restoration exactly matched every captured timing register. After
-  returning through idle, reloading P0 also recovered the original registers.
-  A deterministic VRAM pattern passed 105 full 64 MiB comparisons with no
-  mismatches or CUDA errors; peak temperature was 40 degrees C. This confirms
-  the FAW write path, not every decoded timing field or long-term stability.
-  Evidence: `experiments/kepler-timing-writes-47212.json`.
-- No shipped I2C regulator profile matches this board. Voltage boost, live
-  NVVDD/MSVDD rail readings and confirmed per-rail limits are unavailable.
-  The private clock-control getter accepts masks and echoes zero-filled records;
-  this does not establish its field meanings or a physical voltage response.
-  No private clock-domain or rail writes were attempted on Kepler.
+## Memory timing write results
 
-Fixes from this round: infer the boost clock grid from the contiguous upper
-clock-list regime (13.049 MHz here), rather than averaging the mixed Kepler
-regimes into 5.523 MHz; block the unvalidated Kepler private layout and mapping;
-hide private offsets and unavailable power/voltage sliders; refuse Max it before
-any writes when the V/F curve cannot be read. Regular and limited de-flatten
-remain unavailable on this adapter. These observations do not establish a
-Kepler voltage ceiling or maximum stable overclock.
+All observations use nvtune on driver 472.12. A stored field alone does not
+establish usable live timing control.
 
-### GTX 770 GPU/memory clock-lock support
-
-On this GTX 770 / GK104 with driver 472.12, both NVML clock-lock setters
-return **Not Supported (3)** while running as administrator:
-
-| API | Requested range | Result |
+| Card | Result | Restoration and workload check |
 | --- | --- | --- |
-| `nvmlDeviceSetGpuLockedClocks` | 1176..1176 MHz | Not Supported (3) |
-| `nvmlDeviceSetMemoryLockedClocks` | 3505..3505 MHz | Not Supported (3) |
+| TITAN RTX | FAW 16 → 17 dropped | Original field unchanged |
+| TITAN Xp | FAW 24 → 25 landed | Exact restoration confirmed |
+| GTX 770 | FAW 32 → 33 twice; 15 delay fields in the sweep landed across broadcast and all four partitions | Every captured register restored exactly, including after idle → P0; 207 full 64 MiB comparisons passed during the sweep, plus 49 after final recovery |
+| GTX 770 | CL 18 → 19 initially verified, then caused CUDA_ERROR_LAUNCH_FAILED and Display event 4101 | Driver recovered; original registers and a fresh checked load verified afterward; not classified as an ignored write |
 
-The application-clock and default-application-clock getters also return
-Not Supported for graphics and memory. No application-clock setter was tested.
-This is a measured limitation of these APIs on this board/driver, not evidence
-that every possible Kepler P-state-control mechanism is unavailable. The
-backend's generic "needs admin" suffix does not explain this failure: the
-test process was already elevated and the driver returned Not Supported.
+GTX 770 sweep values (original → requested, each restored before the next):
+RC 71→72, RFC 114→115, RAS 50→51, RP 22→23, RD_RCD 25→26,
+WR_RCD 18→19, CDLR 10→11, WR 19→20, R2W_BUS 8→9, PDEX 15→16,
+PDEN2PDEX 7→8, FAW 32→33, CCDL 2→3, CCDS 2→3 and RRD 8→9.
 
-Timing tests used a checked CUDA workload to maintain P0, verifying P0 and
-3505 MHz memory before and after writes. This was not an enforced P-state lock.
+CL was not retried. WL, RPRE, WPRE and WRCRC were not tested after the CL
+failure. W2R_BUS 12→13 and AOND 0→1 produced range warnings and were not
+committed. Structural/training fragments, split refresh fields and inferred
+TIMING22 addresses remained read-only. No force or daemon mode was used.
+The CL result does not establish a POST-only restriction or rule out a change
+that coordinates controller and DRAM programming. None of these short tests
+establishes long-term stability.
 
-### Kepler timing-field sweep
+## I2C regulator discovery: NCP4206
 
-The following one-cycle increases landed, held in the broadcast register and
-all four FBPA partitions, and restored exactly. Every other captured register
-was checked for unintended changes after each write and restoration.
+The author reports NCP4206-based I2C voltage control on GTX 770, GTX 780,
+GTX 780 Ti, TITAN Black and the original TITAN using these Afterburner settings:
 
-| Field | Original -> requested |
-| --- | --- |
-| RC | 71 -> 72 |
-| RFC | 114 -> 115 |
-| RAS | 50 -> 51 |
-| RP | 22 -> 23 |
-| RD_RCD | 25 -> 26 |
-| WR_RCD | 18 -> 19 |
-| CDLR | 10 -> 11 |
-| WR | 19 -> 20 |
-| R2W_BUS | 8 -> 9 |
-| PDEX | 15 -> 16 |
-| PDEN2PDEX | 7 -> 8 |
-| FAW | 32 -> 33 |
-| CCDL | 2 -> 3 |
-| CCDS | 2 -> 3 |
-| RRD | 8 -> 9 |
+```ini
+[Settings]
+VDDC_Generic_Detection=0
+VDDC_NCP4206_Detection=4:20h
+```
 
-**CL is not validated for live adjustment: 18 -> 19 caused a driver
-timeout/recovery.** nvtune initially reported
-applied and verified, but the CUDA checker failed with CUDA_ERROR_LAUNCH_FAILED
-and Windows logged Display event 4101. The later original-value readback must
-not be classified as an ignored write or a read-only register. This test does
-not establish whether CL is restricted to POST/training, or whether a working
-change requires coordinated controller/DRAM programming. Restoration read back the entire
-original timing-register set; a fresh checked load recovered normally. CL was
-not retried. WL, RPRE, WPRE and WRCRC were left untested after this failure.
+These are candidate GPU families from user experience, not a claim that every
+board variant uses the same regulator or bus routing. Afterburner's bus index
+is not assumed to equal an NVAPI port number.
 
-W2R_BUS 12 -> 13 and AOND 0 -> 1 produced nvtune range warnings and were not
-committed. Structural/training fragments, split refresh fields and the inferred
-TIMING22 fields remained read-only. No force or daemon mode was used.
+The local GTX 770 responds at 7-bit address 0x20 on NVAPI port 2: MFR_ID
+(0x99, one byte) = 0x41, MFR_MODEL (0x9A, two bytes) = 0x3298 and
+MFR_REVISION (0x9B, one byte) = 0x01. Ports 0, 1 and 3–7 did not respond
+at that address. This confirms an accessible I2C device consistent with the
+reported controller family. The manufacturer ID matches the
+[onsemi NCP4206 datasheet](https://www.onsemi.com/download/data-sheet/pdf/ncp4206-d.pdf),
+Table 11; the observed model/revision differ from its default 0x0208/0x03,
+so the exact variant/identity needs resolving before declaring a write profile.
 
-The successful 15-field sweep completed 207 full 64 MiB pattern comparisons
-with zero mismatches. A final fresh-load check matched all original timing
-registers and passed another 49 comparisons. Core/memory offsets remained zero
-and the fan remained on automatic policy. These short checks establish register
-response and recovery, not maximum performance or long-term stability.
-Evidence: `experiments/kepler-timing-sweep-47212.json`.
+The previous "no matching regulator profile" observation meant Druta shipped
+no matching recipe; it did not establish that this card lacked I2C support.
+Only identity registers were read in this follow-up. NCP4206 voltage writes,
+telemetry conversion, limits and restoration are not yet validated in Druta.

@@ -10,6 +10,12 @@ This document is the format. The worked example beside it,
 [`rtx2080ti-mp2888a.toml`](rtx2080ti-mp2888a.toml), is the one
 board where every value below was measured rather than assumed.
 
+NCP4206 discovery for GTX 770/780/780 Ti and the original TITAN/TITAN Black is
+tracked in the [driver compatibility matrix](../DRIVER-COMPATIBILITY.md#i2c-regulator-discovery-ncp4206).
+The local GTX 770 answers identity reads at NVAPI port 2, address 0x20; a
+validated NCP4206 write profile does not yet ship. The absence of a matching
+TOML profile must not be read as absence of I2C support on those GPUs.
+
 ---
 
 ## The three rules that shape everything else
