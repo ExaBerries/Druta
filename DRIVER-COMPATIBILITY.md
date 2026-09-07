@@ -163,9 +163,16 @@ Machine-readable results: `experiments/kepler-validation-47212.json`.
   automatic Windows sign-in application was not enabled or tested on this card.
 - Repeated RTX -> GTX 770 -> RTX switching recovers all 128 RTX curve points.
   The Kepler V/F getter reports unavailable, not a fabricated zero-frequency point.
-- nvtune read-only timing capture succeeds with 33 decoded fields and stable
-  3505 MHz memory around the capture. Register decoding and timing writes are
-  not independently validated on this board; no timing writes were performed.
+- nvtune timing capture succeeds with 33 decoded fields and stable 3505 MHz
+  memory around the capture. FAW writes were then verified in two cycles of
+  32 -> 33 -> 32 under P0 load. CONFIG3 at 0x10F29C changed only the FAW bits;
+  the broadcast aperture and all four partitions held the requested value.
+  Each restoration exactly matched every captured timing register. After
+  returning through idle, reloading P0 also recovered the original registers.
+  A deterministic VRAM pattern passed 105 full 64 MiB comparisons with no
+  mismatches or CUDA errors; peak temperature was 40 degrees C. This confirms
+  the FAW write path, not every decoded timing field or long-term stability.
+  Evidence: `experiments/kepler-timing-writes-47212.json`.
 - No shipped I2C regulator profile matches this board. Voltage boost, live
   NVVDD/MSVDD rail readings and confirmed per-rail limits are unavailable.
   The private clock-control getter accepts masks and echoes zero-filled records;

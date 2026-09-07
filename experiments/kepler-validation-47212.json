@@ -1109,7 +1109,17 @@
     "Additional Memory Clock Offset",
     "NVML power limit and voltage boost",
     "I2C: no matching regulator profile",
-    "Timing writes not validated",
     "Full profile/startup remains incomplete without a V/F table"
-  ]
+  ],
+  "timing_write_verification": {
+    "evidence": "kepler-timing-writes-47212.json",
+    "field": "FAW",
+    "cycles": 2,
+    "change": "32 -> 33 -> 32",
+    "broadcast_and_four_partitions": true,
+    "restored_all_captured_registers": true,
+    "verified_64MiB_copies": 105,
+    "mismatches": 0,
+    "scope": "FAW write path only; not all timing fields or long-term stability"
+  }
 }

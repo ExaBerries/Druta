@@ -66,6 +66,7 @@ function Get-SourceSnapshot {
         'experiments/legacy-frequency-production-47212.json',
         'experiments/compatibility-validation-47212.json',
         'experiments/kepler-validation-47212.json',
+        'experiments/kepler-timing-writes-47212.json',
         'tools/i2c_discover.py', 'tools/probe_volt_rails.py'
     )
     # Only the explicitly public measurement files above are included
