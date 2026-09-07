@@ -9,21 +9,29 @@ these boards and drivers. Blackwell's existing 580.97 controls are separate;
 this comparison does not establish a 472.12 Blackwell path. The 580.97 baseline
 column describes the TITAN boards; GTX 770, GTX 745 and GTX 690 were tested only on 472.12.
 
+**Suppressed** means **unavailable in Druta and therefore not shown**. It is a
+UI capability status, not proof that hardware lacks the feature. Each entry
+states whether the reason is an unsupported getter, missing records, an
+undecoded field mapping, or an unverified write effect. A visible action whose
+write is refused (for example, Apply before Verify) is described as *refused*,
+not suppressed.
+
 | Feature | 580.97 baseline | TITAN RTX on 472.12 | TITAN Xp on 472.12 | GTX 770 on 472.12 | GTX 745 DDR3 on 472.12 | GTX 690, both cores on 472.12 |
 |---|---|---|---|---| --- | --- |
 | NVML loading and GPU identity | Confirmed | Confirmed; Standard-driver NVSMI directory supported | Confirmed; selected by PCI slot | Confirmed; NVAPI/NVML agree on PCI identity | Confirmed; NVAPI/NVML identity agrees | Confirmed; distinct PCI slots and UUIDs alongside TITAN RTX |
 | Core offset and range | Confirmed through NVML | Confirmed through NVAPI Pstates20 | Confirmed through NVAPI Pstates20 | Confirmed through NVAPI Pstates20; repeated load/restore cycles | NVAPI Pstates20; +40 → +27 MHz moved 1072 → 1059 MHz, restored twice | Independent Pstates20 writes; +13 request moved 1201 to 1215 MHz, restored twice per core |
 | Ordinary memory offset and range | Confirmed through NVML | Confirmed; same true-MHz slider units | Confirmed; same true-MHz slider units | Confirmed; +25 true MHz moved reported memory 3505 → 3557 MHz | +10 true MHz moved reported DDR3 900 → 910 MHz, restored twice; divisor 1 | Independent +12.5 true MHz request moved reported GDDR5 3004 to 3029 MHz; divisor 2 |
 | Applied-offset and P0 maximum-clock telemetry | Confirmed through NVML | Confirmed through NVAPI Pstates20 | Confirmed through NVAPI Pstates20 | Confirmed through NVAPI Pstates20 | Confirmed through NVAPI Pstates20 | Confirmed through NVAPI Pstates20 |
-| V/F point lock | Confirmed | Confirmed during loaded offset checks; exact lock restored | Confirmed during loaded offset checks; exact lock restored | Unavailable through the current V/F path | No supported V/F table at idle or P0; suppressed | Inapplicable; V/F controls suppressed |
+| V/F point lock | Confirmed | Confirmed during loaded offset checks; exact lock restored | Confirmed during loaded offset checks; exact lock restored | Suppressed: no applicable V/F point-lock path | No supported V/F table at idle or P0; suppressed | Inapplicable; V/F controls suppressed |
 | Fan duty, RPM, manual control and Auto | Confirmed | Both fan controls' requested levels and Auto policies verified through NVAPI; zero RPM is expected on this water-cooled card | Manual duty/RPM response and Auto verified through NVAPI cooler controls | Manual 50%, RPM response and exact Auto-policy restoration confirmed | Manual 90% request reads back; original manual 100% restored; RPM unavailable | 55/60/100% and Auto verified from either core; shared blower; readback takes about one second |
 | Clock event/performance-limit reasons | Confirmed | Legacy NVML ThrottleReasons fallback implemented | Legacy NVML ThrottleReasons fallback implemented | NVAPI performance-decrease reasons readable | NVML/NVAPI limit reasons readable | NVAPI performance-decrease and NVML event telemetry readable |
 | V/F curve editing and de-flatten planners | Confirmed | Negative-point write/reset and raised-cap de-flatten confirmed | Negative-point write/reset and raised-cap de-flatten confirmed; the regular ramp no longer treats the stock clock-list maximum as an overclock ceiling | Not applicable: editor, planners, point locks and shortcuts suppressed; switching back restores RTX’s 128 points | Suppressed; yellow Lock P0 and max fan replaces Max it on the verified board; switching back to a GPU that has V/F curve would restore the curve | Suppressed; yellow Lock P0 and max fan replaces Max it on the verified board; switching back to a GPU that has V/F curve would restore the curve |
-| NVVDD rail offsets and all four limits | Confirmed; see voltage measurements below | Confirmed, including each live ceiling clamp and idle floor | Confirmed, including each live ceiling clamp; floor uses verified legacy re-send | Private layout unvalidated; controls blocked | Unvalidated private layout; writes blocked | Private layout unvalidated; controls blocked |
-| Per-domain clock offsets | Confirmed for mapped controls | XBAR, Additional Memory Clock Offset, SYS, VIDEO and LTC each moved by about +30 MHz under load | Additional Memory Clock Offset +25 MHz moved reported memory by +20.25 MHz twice; other paired controls remain hidden | Unvalidated; private controls hidden, including Additional Memory Clock Offset | No confirmed pairing; hidden | Private layout unvalidated; hidden |
-| Power limit and voltage boost | Confirmed | Confirmed with independent readback | Confirmed with independent readback | NVML power-limit range and voltage-boost getter unavailable; sliders hidden | Power-limit range and voltage-boost getter unavailable; sliders hidden | NVML watt limits and voltage-boost getter unsupported; sliders hidden |
+| NVVDD rail offset | Confirmed | Confirmed | Confirmed | Suppressed: offset-field mapping/write effect unverified | Suppressed: offset-field mapping/write effect unverified | Suppressed: private getter supplies no domain records; no offset-field mapping |
+| Four NVVDD limits | Confirmed; see measurements below | Confirmed, including live ceiling clamps and idle floor | Confirmed, including live ceiling clamps; floor uses verified legacy re-send | Suppressed: no verified limit-write path | Suppressed: no verified limit-write path | Suppressed: control getter has no rail records; live getter reports Not Supported |
+| Per-domain clock offsets | Confirmed for mapped controls | XBAR, Additional Memory Clock Offset, SYS, VIDEO and LTC each moved by about +30 MHz under load | Additional Memory Clock Offset +25 MHz moved reported memory by +20.25 MHz twice; other paired controls remain suppressed | Suppressed: offset-control fields/write effects unverified, including Additional Memory Clock Offset | Suppressed: control-to-clock pairing/write effects unverified | Suppressed: private getter supplies no domain records |
+| Power limit and voltage boost | Confirmed | Confirmed with independent readback | Confirmed with independent readback | NVML power-limit range and voltage-boost getter unavailable; sliders suppressed | Power-limit range and voltage-boost getter unavailable; sliders suppressed | NVML watt limits and voltage-boost getter unsupported; sliders suppressed |
 | NVML frequency lock | Works on Turing; unsupported on Pascal | Confirmed at 1500 MHz under load; legacy RM readback also sees another process's range | Unsupported baseline; V/F point lock remains available | GPU 1176..1176 MHz and memory 3505..3505 MHz both return Not Supported (3), while elevated | GPU 1072 MHz / memory 900 MHz locks return Not Supported through NVML and nvidia-smi; application-clock writes/readback succeed but do not hold P0 | GPU 1202 MHz / memory 3004 MHz locks and application-clock queries return Not Supported (3) |
-| Profiles, Undo, Reset all and Max it | Existing composite actions | All 13 UI callback checks passed; exact controls/table/lock restoration | All 13 UI callback checks passed; exact controls/table/lock restoration | Profiles omit the inapplicable V/F table; Reset all skips curve writes; Max it hidden. Core/memory/fan and I2C restoration verified separately; default profile replay covered by hardware-free tests | Full profile replay restored +40 core, zero memory offset and manual 100% fan; no V/F requirement | Independent profile identity/replay; P0/fan Undo, Release, Reset and exit verified on both cores |
+| Profiles, Undo, Reset all and Max it | Existing composite actions | All 13 UI callback checks passed; exact controls/table/lock restoration | All 13 UI callback checks passed; exact controls/table/lock restoration | Profiles omit the inapplicable V/F table; Reset all skips curve writes; Max it suppressed. Core/memory/fan and I2C restoration verified separately; default profile replay covered by hardware-free tests | Full profile replay restored +40 core, zero memory offset and manual 100% fan; no V/F requirement | Independent profile identity/replay; P0/fan Undo, Release, Reset and exit verified on both cores |
 | I2C regulator control | Board/tool dependent | MP2888A verified under load: +75 mV request moved rail-minus-VID by +45 mV; original raw value restored | No matching regulator found on this board | NCP4206 absolute target verified at 1250/1262.5 mV; Auto and profile restoration exact | No matching registered profile found; no voltage writes | NCP4206 discovered independently on both cores; bounded response and exact restoration verified |
 | Memory timing capture and writes | Board/tool dependent | Capture works; FAW 16→17 is dropped by hardware and reported as dropped | Capture, FAW 24→25 write, and exact restore confirmed | Capture and 15 delay fields verified; exact restoration; CL 18→19 triggered driver recovery (details below) | All 33 timing fields queried; 16 delay fields accepted +1 and restored across both partitions; CL queried only; zero-value restore caveat below | 33 fields queried on each core; 14 delay fields accepted +1 and restored across four partitions; peer unchanged |
 | MSVDD | Unavailable on these TITAN boards | Unavailable; no confirmed rail | Unavailable; no confirmed rail | No confirmed rail | No confirmed rail | No confirmed rail |
@@ -45,6 +53,47 @@ were restored. These short checks do not establish maximum clocks or stability.
 No voltage or CAS-latency writes were made. Windows sign-in replay is untested.
 
 The subsequent [full timing query and bounded sweep](experiments/maxwell-gtx745-timing-sweep-47212.md) verified 16 writable delay fields and exact final restoration with 270 checked transfers. CCDL/CCDS start at zero; nvtune warns on restoring zero despite allowing a +1 test. CCDL restored on a P-state transition; CCDS used an exact-original restoration override. Latency/preamble/protocol, structural/split, inferred and warning-producing fields remain query-only.
+
+## Legacy private-control decoding status
+
+The earlier phrase "private layout unvalidated" conflated separate interfaces.
+Private **clock telemetry** is already decoded on Kepler/Maxwell. The private
+**offset-control fields** and their physical write effects have not been
+established on GTX 770/745/690. The four-limit getter uses a separate, already
+decoded API; its write path additionally needs measured bases/defaults and a
+validated transport. These are not one shared undecoded structure.
+
+[Raw read-only probes](experiments/legacy-private-layout-47212.json) on 2026-09-07
+compared both installed GTX 690 cores with the TITAN RTX, at idle and under
+CUDA load (GTX 690 P0, RTX P2). The GTX 745 and GTX 770 were not installed for
+this follow-up; their cells retain the earlier, narrower evidence.
+
+| Query on each GTX 690 core | Observed result on 472.12 |
+|---|---|
+| Clock-domain control GET `0xF58938F5`, version `0x261A4` | Masks 0 and one-hot bits 0–8 succeed; only header dword at `0x0C` changes to `0x01010000`. No domain records are populated, including at P0. Other one-hot bits and the all-bits mask return `-1`. |
+| Same GET, version `0x161A4` | `-9`, incompatible structure version |
+| Rail control GET `0xA3070DB0`, version `0x10AC8` | Masks 0/1/2/3 succeed with unchanged buffers; no rail records. Version `0x20AC8` returns `-9`. |
+| Live rail GET `0x5D0634EE`, version `0x10AC8` | `-104`, Not Supported, for masks 0/1/2/3. Version `0x21620` returns `-9`. |
+
+The RTX positive control populated clock-mode records and live rail fields via
+the same getters. Thus the GTX 690 result is not just Druta declining to parse
+available legacy records: these requests returned no offset records to decode.
+It does not prove that every possible driver interface lacks such controls.
+No private setter or voltage write was used during these probes. NVIDIA's
+[status definitions](https://docs.nvidia.com/nvapi/group__nvapistatus.html)
+distinguish generic error `-1`, incompatible version `-9`, and unsupported `-104`.
+
+`GPU.clkdom_debug_report()` now retains raw changed dwords, request masks and
+statuses when the control path is suppressed, alongside decoded clock telemetry.
+It does not apply Turing field names to unknown legacy bytes or enable writes.
+For a specific slot, a read-only report can be collected from source with:
+
+```powershell
+python -c "from nvbackend import GPU; import json; print(json.dumps(GPU('0000:04:00.0').clkdom_debug_report(), indent=2))"
+```
+
+New mapping evidence must include actual record data and a measured, restorable
+write effect before the corresponding adjustment can be exposed.
 
 ## GTX 690 with three GPUs
 
@@ -103,7 +152,7 @@ of 1207.03 mV. VMON rose to 1218.75–1226.56 mV across the two cores. The other
 core's command/configuration registers stayed unchanged during every write,
 and 0x21/0xD2/0xD3/0xDD were restored exactly. This establishes separate
 controller addressing. NVAPI per-rail and private clock-domain writes remain
-unvalidated and hidden; the NCP4206 path is direct I2C control.
+suppressed because their private-driver write path is unverified; the NCP4206 path is direct I2C control.
 
 The three-GPU review corrected stale telemetry after switching and moved UI
 callbacks onto the render thread so controls cannot be rebuilt concurrently
@@ -161,8 +210,8 @@ Final state: automatic P8, +40 MHz core offset, stock memory offset, manual
 
 XBAR, SYS, VIDEO, LTC and additional memory-clock writes on GTX 770/745 have
 not been verified. Read-only discovery did not establish a usable private
-control mapping. They remain hidden as unvalidated, rather than classified as
-proven inert. The backend now returns unknown for unmeasured domain/architecture
+control mapping. They remain suppressed because the control mapping/write response has not
+been verified; this does not establish that they are inert. The backend now returns unknown for unmeasured domain/architecture
 combinations; the explicit measured Pascal/Turing/Blackwell results remain.
 
 ## Ordinary clock offsets
@@ -290,7 +339,7 @@ and multiple candidates are covered by transport mocks, not additional boards.
 The actual Verify button passed under CUDA load at GPU VID 1050 mV. The +75 mV
 trial moved rail-minus-VID by +44 mV against a 37.5 mV threshold. The original
 raw offset 0 was restored exactly; a subsequent +6.25 mV Apply stored raw 1,
-and Stock restored raw 0. Apply and Stock were both blocked before verification.
+and Stock restored raw 0. Apply and Stock requests were both refused before verification.
 This proves the write response on the tested controller, not universal board
 compatibility or a calibrated gain. Voltage limits were not raised in this run.
 

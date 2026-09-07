@@ -2974,7 +2974,32 @@ class GPU:
         report["accepted_domains"] = list(domains)
         layout = self.clkdom_layout()
         if layout is None:
-            report["error"] = "version/layout probe failed"
+            # A suppressed write path must not suppress the evidence needed to
+            # decode it. Keep unknown fields as raw offsets, without applying
+            # Turing's record layout or interpreting accepted masks as support.
+            report["error"] = "offset controls suppressed: field mapping/write response unverified"
+            report["raw_queries"] = []
+            for mask in [0] + [1 << d for d in domains]:
+                status, raw = self._clkdom_get(mask)
+                initial = bytearray(len(raw))
+                struct.pack_into("<I", initial, 0, CLKDOM_VERSION)
+                struct.pack_into("<I", initial, CLKDOM_MASK_DW * 4, mask)
+                returned = bytes(raw)
+                changes = {}
+                for offset in range(0, len(returned), 4):
+                    if returned[offset:offset + 4] != initial[offset:offset + 4]:
+                        changes[f"0x{offset:X}"] = struct.unpack_from("<I", returned, offset)[0]
+                report["raw_queries"].append({
+                    "mask": mask, "status": int(status),
+                    "version_echo": self._clkdom_word(raw, 0),
+                    "changed_dwords": changes,
+                })
+            try:
+                rows, err = self.read_clock_domains()
+                report["private_clock_domains"] = rows
+                report["private_clock_domains_error"] = err
+            except Exception as exc:
+                report["private_clock_domains_error"] = str(exc)
             return report
         report["layout"] = {
             "name": layout.name,
