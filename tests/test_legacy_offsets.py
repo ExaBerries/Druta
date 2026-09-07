@@ -8,7 +8,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-import nvbackend as n
+from druta import nvbackend as n
 
 
 class PstatesAPI:

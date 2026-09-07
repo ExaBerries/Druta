@@ -11,9 +11,9 @@ from pathlib import Path
 import sys
 import time
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import nvbackend as n
-from tools.probe_volt_rails import rm_call, snapshot, stable_fields, transport_ok
+# When run as module, parent package is accessible
+from .. import nvbackend as n
+from ..tools.probe_volt_rails import rm_call, snapshot, stable_fields, transport_ok
 
 CONTROL_VERSION = 0x10AC8
 

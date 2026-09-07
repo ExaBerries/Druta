@@ -41,7 +41,7 @@ import math
 import os
 import re
 import time
-from startup import atomic_json
+from .startup import atomic_json
 
 SCHEMA = 2
 DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "profiles")

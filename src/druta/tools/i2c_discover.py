@@ -22,9 +22,9 @@ WHAT IT CANNOT DO, and you should not pretend otherwise in a profile:
     part is not reachable as shipped, not that the card lacks one.
 
 Usage:
-    python tools/i2c_discover.py                 # ports 0-7, common addresses
-    python tools/i2c_discover.py --ports 0,1,2   # narrow the sweep
-    python tools/i2c_discover.py --full          # every 7-bit address, slower
+    python -m druta.tools.i2c_discover.py                 # ports 0-7, common addresses
+    python -m druta.tools.i2c_discover.py --ports 0,1,2   # narrow the sweep
+    python -m druta.tools.i2c_discover.py --full          # every 7-bit address, slower
 
 Run it under load if you want meaningful voltage numbers. At idle a multiphase
 controller sheds phases and reads like a different part.
@@ -34,8 +34,8 @@ import ctypes
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import nvbackend as nb                                        # noqa: E402
+# When run as module, parent package is accessible
+from .. import nvbackend as nb
 
 u8, u32 = ctypes.c_uint8, ctypes.c_uint32
 PTR, P8 = ctypes.c_void_p, ctypes.POINTER(u8)

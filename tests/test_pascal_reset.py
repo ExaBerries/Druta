@@ -2,8 +2,8 @@
 import unittest
 from unittest.mock import Mock
 
-from nvbackend import GPU
-from test_nvml_legacy import gpu_with, output
+from druta.nvbackend import GPU
+from tests.test_nvml_legacy import gpu_with, output
 
 
 def reset_gpu(status=3, arch=4):

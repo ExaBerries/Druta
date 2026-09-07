@@ -9,7 +9,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 
-import nvbackend
+import druta.nvbackend as nvbackend
 
 
 SYSTEM_DLL = r"D:\Windows\System32\nvml.dll"

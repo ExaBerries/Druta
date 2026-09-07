@@ -24,15 +24,15 @@ say. The point is that a switch must leave no control carrying the previous
 card's numbers, and the only way to be sure of that is to read them back.
 
 Needs two NVIDIA GPUs and, for the V/F table probe, administrator rights.
-Run: python test_swap.py
+Run: python -m tests.test_swap
 """
 import math
 import sys
 
 import dearpygui.dearpygui as dpg
 
-import druta
-import nvbackend
+from druta import druta
+from druta import nvbackend
 
 
 FAILS = []

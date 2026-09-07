@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-import nvbackend as n
+from druta import nvbackend as n
 
 
 def records(low=1200, high=1500):

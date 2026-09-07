@@ -92,6 +92,29 @@ commands inside `source`.
 
 ---
 
+# Development
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+pip install -e .
+```
+
+Run the tests:
+
+```bash
+pytest
+```
+
+Lint and type-check:
+
+```bash
+ruff check src/ tests/
+pyright
+```
+
+---
+
 
 # Run
 

@@ -19,7 +19,7 @@
        beside-exe i2c/) into dist/Druta-<version>-win64.zip.
 
     Version comes from a VERSION / __version__-style constant grepped out of
-    druta.py at build time. This script does not own druta.py and will not
+    src/druta/druta.py at build time. This script does not own druta.py and will not
     add one: if no such constant is found, the zip is named with "dev"
     instead of an invented version number.
 
@@ -44,7 +44,7 @@ $exePath   = Join-Path $bundleDir 'Druta.exe'
 $specPath  = Join-Path $root 'Druta.spec'
 $i2cSrc    = Join-Path $root 'i2c'
 $i2cDst    = Join-Path $bundleDir 'i2c'
-$drutaPy   = Join-Path $root 'druta.py'
+$drutaPy   = Join-Path $root 'src/druta/druta.py'
 $sourceDir = Join-Path $bundleDir 'source'
 
 # Keep this explicit: a working tree also contains private research, session
@@ -53,11 +53,12 @@ $sourceDir = Join-Path $bundleDir 'source'
 # of HEAD (which may describe a different executable).
 function Get-SourceSnapshot {
     $paths = @(
-        'app.py', 'druta.py', 'nvbackend.py', 'gpuload.py', 'profiles.py', 'startup.py',
-        'railctl.py', 'shuntmod.py', 'timings.py', 'timingwrite.py',
-        'Druta.spec', 'build.ps1', 'requirements.txt',
-        'COPYING', 'THIRD-PARTY-NOTICES.md', 'README.md', 'MANUAL.md',
-        'TECHNICALDOCUMENTATION.md', 'DEBUG-SUMMARY-RTX5080.md',
+        'src/druta/app.py', 'src/druta/druta.py', 'src/druta/nvbackend.py', 'src/druta/gpuload.py', 'src/druta/profiles.py', 'src/druta/startup.py',
+        'src/druta/railctl.py', 'src/druta/shuntmod.py', 'src/druta/timings.py', 'src/druta/timingwrite.py',
+        'src/druta/__init__.py', 'src/druta/__main__.py',
+        'Druta.spec', 'build.ps1', 'requirements.txt', 'pyproject.toml',
+        'COPYING', 'THIRD-PARTY-NOTICES.md', 'README.md',
+        'MANUAL.md', 'TECHNICALDOCUMENTATION.md', 'DEBUG-SUMMARY-RTX5080.md',
         'VOLTAGE-RAILS-TITAN.md', 'VOLTAGE-RAILS-47212.md', 'DRIVER-COMPATIBILITY.md',
         'RELEASE-NOTES-1.3.0.md',
         'experiments/voltage-rails-20260906.json',
@@ -65,13 +66,13 @@ function Get-SourceSnapshot {
         'experiments/legacy-offsets-47212-0000-02-00.0.json',
         'experiments/legacy-frequency-production-47212.json',
         'experiments/compatibility-validation-47212.json',
-        'tools/i2c_discover.py', 'tools/probe_volt_rails.py'
+        'src/druta/tools/i2c_discover.py', 'src/druta/tools/probe_volt_rails.py'
     )
     # Only the explicitly public measurement files above are included
     # from experiments/. Other research/session captures remain excluded.
     # Include regression tests and the public regulator profiles, including
     # newly added files. No recursive wildcard can wander into docs/ or drv/.
-    foreach ($pattern in @('test_*.py', 'tests/test_*.py', 'i2c/*.toml', 'i2c/*.md')) {
+    foreach ($pattern in @('tests/test_*.py', 'i2c/*.toml', 'i2c/*.md')) {
         $paths += @(Get-ChildItem -Path (Join-Path $root $pattern) -File -ErrorAction SilentlyContinue |
             ForEach-Object { $_.FullName.Substring($root.Length + 1).Replace('\', '/') })
     }

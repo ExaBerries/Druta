@@ -50,7 +50,7 @@ import os
 import re
 import subprocess
 
-import timings
+from . import timings
 
 # ---- outcomes -------------------------------------------------------------- #
 LANDED = "landed"            # written, read back changed

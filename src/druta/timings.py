@@ -83,7 +83,7 @@ from dataclasses import dataclass, field as _dc_field
 # For slot parsing only. nvbackend loads no driver library at import time - the
 # DLLs open in NvAPI/Nvml constructors - so this stays a pure-Python import and
 # does not make merely importing timings.py touch the hardware.
-import nvbackend
+from . import nvbackend
 
 # ---- where the tool lives -------------------------------------------------- #
 NVTUNE_EXE = "nvtune.exe"

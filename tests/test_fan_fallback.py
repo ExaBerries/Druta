@@ -6,10 +6,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-import profiles
-from nvbackend import (_CoolerSettings, _CoolerLevels, _FanCoolersControl,
+from druta import profiles
+from druta.nvbackend import (_CoolerSettings, _CoolerLevels, _FanCoolersControl,
                        _FanCoolersStatus, u32)
-from test_nvml_legacy import gpu_with, output
+from tests.test_nvml_legacy import gpu_with, output
 
 
 def copy_to(ptr, value):

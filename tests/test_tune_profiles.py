@@ -8,8 +8,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-import profiles
-from druta import Druta
+from druta import profiles, Druta
 
 
 def hardware():

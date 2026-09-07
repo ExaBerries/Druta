@@ -16,8 +16,9 @@ import struct
 import sys
 import time
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from nvbackend import GPU, u32
+# When run as module, parent package is accessible
+from .. import nvbackend
+from ..nvbackend import GPU, u32
 
 
 def transport_ok(result):

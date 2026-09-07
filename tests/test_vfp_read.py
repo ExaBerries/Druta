@@ -13,7 +13,7 @@ import threading
 import unittest
 from unittest.mock import Mock
 
-from nvbackend import GPU, NvAPI, _BoostTable, _VfpCurve
+from druta.nvbackend import GPU, NvAPI, _BoostTable, _VfpCurve
 
 
 class CurveAPI:

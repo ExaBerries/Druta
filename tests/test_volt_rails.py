@@ -17,7 +17,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from nvbackend import GPU, i32, u32
+from druta.nvbackend import GPU, i32, u32
 
 
 ADAPTERS = {
@@ -79,8 +79,8 @@ class FakeRailAPI:
 def fake_gpu(kind="turing", **identity_changes):
     identity = dict(ADAPTERS[kind], **identity_changes)
     api = FakeRailAPI(identity, (0, 1) if kind == "blackwell" else (0,))
-    with patch("nvbackend.NvAPI", return_value=api), \
-            patch("nvbackend.Nvml", return_value=SimpleNamespace(
+    with patch("druta.nvbackend.NvAPI", return_value=api), \
+            patch("druta.nvbackend.Nvml", return_value=SimpleNamespace(
                 selected=dict(api.selected))), \
             patch.object(GPU, "_read_static", return_value=identity):
         gpu = GPU("0000:01:00.0")
@@ -125,7 +125,7 @@ class VoltageModeTests(unittest.TestCase):
         self.assertFalse(second.voltage_xoc_enabled)
 
     def test_offset_bounds_and_carryover_reject_before_dispatch(self):
-        from nvbackend import CLKDOM_LAYOUT_TURING
+        from druta.nvbackend import CLKDOM_LAYOUT_TURING
         gpu = fake_gpu()
         layout = CLKDOM_LAYOUT_TURING
         gpu.clkdom_ok = Mock(return_value=True)
@@ -443,8 +443,8 @@ class RailEscapeTests(unittest.TestCase):
             self.assertIn(name, ("gdi32.dll", "kernel32"))
             return gdi if name == "gdi32.dll" else kernel
 
-        with patch("nvbackend.ctypes.WinDLL", new=fake_dll, create=True), \
-                patch("nvbackend.ctypes.WINFUNCTYPE", new=fake_prototype,
+        with patch("druta.nvbackend.ctypes.WinDLL", new=fake_dll, create=True), \
+                patch("druta.nvbackend.ctypes.WINFUNCTYPE", new=fake_prototype,
                       create=True):
             result = GPU._write_rail_records(gpu, records)
         self.assertEqual(bytes(code_buffer), original_code)
@@ -479,7 +479,7 @@ class RailEscapeTests(unittest.TestCase):
 
     def test_escape_refuses_absent_rail_or_unreadable_boost_before_loading_dll(self):
         gpu = fake_gpu()
-        with patch("nvbackend.ctypes.WinDLL", create=True) as loader:
+        with patch("druta.nvbackend.ctypes.WinDLL", create=True) as loader:
             self.assertEqual(GPU._write_rail_records(
                 gpu, {0: [0] * 4, 1: [0] * 4}), (False, None))
             gpu.read_voltage_boost.return_value = None

@@ -13,7 +13,7 @@ VBIOS, not something a Windows CI runner can infer from Python alone.
 import ctypes
 import unittest
 
-from nvbackend import (
+from druta.nvbackend import (
     CLKDOM_LAYOUT_BLACKWELL,
     CLKDOM_LAYOUT_TURING,
     CLKDOM_VERSION,

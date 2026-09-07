@@ -32,8 +32,8 @@ import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-from nvbackend import (GPU, EVENT_REASONS, PERF_DECREASE_BITS,
-                       VF_STEP_KHZ, below_cap, slot_from_argv)
+from .nvbackend import (GPU, EVENT_REASONS, PERF_DECREASE_BITS,
+                        VF_STEP_KHZ, below_cap, slot_from_argv)
 
 # ---- HiDPI --------------------------------------------------------------- #
 # tkinter is DPI-unaware by default: on a scaled display Windows renders the app

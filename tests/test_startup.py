@@ -3,7 +3,6 @@
 """Crash recovery and task construction without signing out or touching GPUs."""
 import copy
 import ctypes
-import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -11,7 +10,7 @@ import unittest
 from unittest.mock import Mock, patch
 import xml.etree.ElementTree as ET
 
-import startup
+from druta import startup
 
 
 class StartupRecovery(unittest.TestCase):

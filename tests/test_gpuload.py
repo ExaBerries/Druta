@@ -6,7 +6,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-import gpuload
+from druta import gpuload
 
 
 class GpuLoadTests(unittest.TestCase):
@@ -42,7 +42,7 @@ class GpuLoadTests(unittest.TestCase):
 
     def test_induce_without_card_identity_never_starts_an_unrelated_load(self):
         for slot in (None, "", "invalid"):
-            with self.subTest(slot=slot), patch("gpuload.BandwidthLoad") as load:
+            with self.subTest(slot=slot), patch("druta.gpuload.BandwidthLoad") as load:
                 result = gpuload.induce(SimpleNamespace(slot=lambda: slot))
                 self.assertIn("cannot target", result["error"])
                 load.assert_not_called()
@@ -50,7 +50,7 @@ class GpuLoadTests(unittest.TestCase):
     def test_induce_passes_the_selected_slot_and_joins_its_load(self):
         gpu = SimpleNamespace(slot=lambda: "0000:02:00.0",
                               read=lambda: {"mem": 5705, "pstate": 2})
-        with patch("gpuload.BandwidthLoad") as make, patch("gpuload.time.sleep"):
+        with patch("druta.gpuload.BandwidthLoad") as make, patch("druta.gpuload.time.sleep"):
             load = make.return_value
             load.error = ""
             load.done.is_set.return_value = False

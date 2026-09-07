@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from druta import Druta
-from nvbackend import GPU
+from druta.nvbackend import GPU
 
 
 def editor(freq_div, step_khz, points, gfx_max=2300):

@@ -88,18 +88,13 @@ import time
 
 import dearpygui.dearpygui as dpg
 
-import gpuload
-import profiles
-import startup
-import shuntmod
-import timings
-import timingwrite
-from nvbackend import (GPU, EVENT_REASONS, PERF_DECREASE_BITS, VF_STEP_KHZ,
-                       VFP_POINTS, below_cap, enumerate_gpus, is_admin,
-                       same_slot,
-                       PRIV_CONFIRMED, PRIV_DOMAIN_ID, PRIV_LIKELY,
-                       PRIV_N_DOMAINS, PRIV_PCIE_GEN, PRIV_UNNAMED,
-                       PRIV_UNPOPULATED)
+from . import gpuload, profiles, startup, shuntmod, timings, timingwrite
+from .nvbackend import (GPU, EVENT_REASONS, PERF_DECREASE_BITS, VF_STEP_KHZ,
+                        VFP_POINTS, below_cap, enumerate_gpus, is_admin,
+                        same_slot,
+                        PRIV_CONFIRMED, PRIV_DOMAIN_ID, PRIV_LIKELY,
+                        PRIV_N_DOMAINS, PRIV_PCIE_GEN, PRIV_UNNAMED,
+                        PRIV_UNPOPULATED)
 
 __version__ = "1.3.0"
 

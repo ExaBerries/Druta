@@ -70,7 +70,7 @@ import ctypes
 import threading
 import time
 
-from nvbackend import parse_slot
+from .nvbackend import parse_slot
 
 CUDA_SUCCESS = 0
 MIB = 1 << 20

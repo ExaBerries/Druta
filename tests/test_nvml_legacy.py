@@ -8,7 +8,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from nvbackend import GPU, Nvml, _FanSpeedInfo, u32, u64
+from druta.nvbackend import GPU, Nvml, _FanSpeedInfo, u32, u64
 
 
 def output(value, scalar=u32):

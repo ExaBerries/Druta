@@ -283,7 +283,7 @@ def profile_dirs():
             out.append(os.path.join(mei, "i2c"))
     else:
         out.append(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "i2c"))
+                                "..", "..", "i2c"))
     return out
 
 

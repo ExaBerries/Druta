@@ -8,8 +8,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from nvbackend import GPU, i32, u32
-from test_volt_rails import fake_gpu
+from druta.nvbackend import GPU, i32, u32
+from tests.test_volt_rails import fake_gpu
 
 
 def legacy_gpu(kind="turing", **identity):
@@ -112,9 +112,9 @@ class LegacyRailEscapeTests(unittest.TestCase):
         kernel = SimpleNamespace(VirtualProtect=Mock(return_value=1),
                                  GetCurrentThreadId=Mock(side_effect=[731, callback_thread]))
         gdi = SimpleNamespace(D3DKMTEscape=ctypes.c_void_p(address))
-        with patch("nvbackend.ctypes.WinDLL", new=lambda name, **kw:
+        with patch("druta.nvbackend.ctypes.WinDLL", new=lambda name, **kw:
                    gdi if name == "gdi32.dll" else kernel, create=True), \
-                patch("nvbackend.ctypes.WINFUNCTYPE", new=prototype, create=True):
+               patch("druta.nvbackend.ctypes.WINFUNCTYPE", new=prototype, create=True):
             result = GPU._write_rail_records_locked(gpu, records)
         self.assertEqual(bytes(code), original_code)
         self.assertEqual(len(sent), 1)

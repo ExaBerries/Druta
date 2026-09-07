@@ -13,10 +13,10 @@ import os
 import tomllib
 import unittest
 
-import railctl
+from druta import railctl
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-I2C_DIR = os.path.join(HERE, "i2c")
+I2C_DIR = os.path.join(HERE, '..', 'i2c')
 TEMPLATE = os.path.join(I2C_DIR, "TEMPLATE.toml")
 
 
