@@ -1,5 +1,7 @@
 # Druta
 
+**Version 1.3.0** — [release notes](RELEASE-NOTES-1.3.0.md).
+
 A monitor and tuner for Pascal/Turing/Blackwell NVIDIA cards, driven through NVAPI/NVML private
 interfaces. It edits the V/F curve
 with planners built around how the boost arbiter actually behaves, and reads and
@@ -76,7 +78,7 @@ python -m pip install -r requirements.txt
 ```
 
 The local build produces `dist\Druta\Druta.exe` and
-`dist\Druta-dev-win64.zip` (or the app version when defined). Distribute the
+`dist\Druta-1.3.0-win64.zip`. Distribute the
 whole `Druta` folder or ZIP: the EXE needs its adjacent `_internal` folder.
 
 `dist\Druta\source\` contains the matching working-tree source, including

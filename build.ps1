@@ -59,6 +59,7 @@ function Get-SourceSnapshot {
         'COPYING', 'THIRD-PARTY-NOTICES.md', 'README.md', 'MANUAL.md',
         'TECHNICALDOCUMENTATION.md', 'DEBUG-SUMMARY-RTX5080.md',
         'VOLTAGE-RAILS-TITAN.md', 'VOLTAGE-RAILS-47212.md', 'DRIVER-COMPATIBILITY.md',
+        'RELEASE-NOTES-1.3.0.md',
         'experiments/voltage-rails-20260906.json',
         'experiments/legacy-offsets-47212-0000-01-00.0.json',
         'experiments/legacy-offsets-47212-0000-02-00.0.json',

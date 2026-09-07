@@ -101,6 +101,8 @@ from nvbackend import (GPU, EVENT_REASONS, PERF_DECREASE_BITS, VF_STEP_KHZ,
                        PRIV_N_DOMAINS, PRIV_PCIE_GEN, PRIV_UNNAMED,
                        PRIV_UNPOPULATED)
 
+__version__ = "1.3.0"
+
 # ---- palette (ImGui takes 0-255 RGBA) ------------------------------------- #
 TEXT = (230, 232, 236)
 DIM = (139, 144, 153)
@@ -5302,7 +5304,7 @@ class Druta:
         duplicated prose, and the two copies had already drifted apart."""
         st = self.gpu.static
         cr, mr = st.get("core_off_range"), st.get("mem_off_range")
-        return f"""Druta - device report
+        return f"""Druta {__version__} - device report
 
 Device : {st.get('name')}
 Driver : {st.get('driver')}     VBIOS : {st.get('vbios')}
@@ -6282,7 +6284,7 @@ deliberately does not put behind a button."""
         with dpg.window(label="About Druta", tag="win_about", show=False,
                         width=self.s(620), height=self.s(430),
                         pos=[self.s(180), self.s(160)]):
-            dpg.add_text("Thermetery Druta", color=ACCENT)
+            dpg.add_text(f"Thermetery Druta {__version__}", color=ACCENT)
             dpg.add_text("Copyright (C) 2026 Thermetery Technology Co Limited")
             dpg.add_text(
                 "This program comes with ABSOLUTELY NO WARRANTY. It is free "
@@ -7066,7 +7068,7 @@ deliberately does not put behind a button."""
             self._rebuilding = False
         st = self.gpu.static
         if len(self.gpu_list) > 1:
-            dpg.set_viewport_title(f"Thermetery Druta  -  {st.get('name')}  "
+            dpg.set_viewport_title(f"Thermetery Druta {__version__}  -  {st.get('name')}  "
                                    f"{self.gpu.slot()}")
         self.repaint_log()
         self.relayout()
@@ -8240,7 +8242,7 @@ deliberately does not put behind a button."""
         root's other children."""
         st = self.gpu.static
         with dpg.group(horizontal=True, tag="hdr_row", parent="root"):
-            dpg.add_text("Thermetery Druta", tag="hdr", color=ACCENT)
+            dpg.add_text(f"Thermetery Druta {__version__}", tag="hdr", color=ACCENT)
             self.bind("hdr", "big")
             dpg.add_text(f"   {st.get('name')}  •  driver "
                          f"{st.get('driver')}  •  vbios "
@@ -8317,7 +8319,7 @@ deliberately does not put behind a button."""
         # The card is in the TITLE, not only inside the window: two Drutas open
         # on two cards are otherwise identical in the taskbar, and picking the
         # wrong one is picking the wrong GPU to write to.
-        title = "Thermetery Druta"
+        title = f"Thermetery Druta {__version__}"
         if len(self.gpu_list) > 1:
             title += f"  -  {self.gpu.static.get('name')}  {self.gpu.slot()}"
         # Wide enough for the Control tab's two columns: each is the knob
@@ -8470,6 +8472,9 @@ def main(argv=None):
     automatic = False
     while argv:
         a = argv.pop(0)
+        if a in ("--version", "-V"):
+            _tell(f"Druta {__version__}")
+            return 0
         if a in ("--list-gpus", "-l"):
             found = enumerate_gpus()
             if not found:
@@ -8491,6 +8496,7 @@ def main(argv=None):
             _tell("usage: Druta [--gpu SLOT] [--list-gpus] [--startup-profile]\n\n"
                   "  --gpu SLOT   open on that card, e.g. 0000:02:00.0\n"
                   "  --list-gpus  print the slot and name of every card\n\n"
+                  "  --version    print the Druta version\n\n"
                   "  --startup-profile  apply the opted-in sign-in profile after shutdown checks\n\n"
                   "With no --gpu, Druta opens on the lowest PCI slot.\n"
                   "Device > Card switches cards in a running window.")
