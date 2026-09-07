@@ -6,8 +6,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-import druta
-from druta import Druta
+import druta.druta as druta
+from druta.druta import Druta
 
 
 def switcher():
@@ -42,9 +42,9 @@ class GpuSwitchTests(unittest.TestCase):
         for arch in (druta.GPU.ARCH_PASCAL, druta.GPU.ARCH_TURING, None):
             with self.subTest(arch=arch):
                 app.gpu.arch.return_value = arch
-                with patch("druta.dpg.does_item_exist",
+                with patch("druta.druta.dpg.does_item_exist",
                            side_effect=lambda tag: tag in app._ctl_widgets), \
-                        patch("druta.dpg.configure_item") as configure:
+                        patch("druta.druta.dpg.configure_item") as configure:
                     app.sync_lock_ui()
                 got = {call.args[0]: call.kwargs["enabled"] for call in configure.call_args_list}
                 self.assertTrue(got.pop("go_release"))
@@ -63,9 +63,9 @@ class GpuSwitchTests(unittest.TestCase):
             with self.subTest(source=source, manual=manual, auto=auto):
                 app.gpu.fan_capabilities = Mock(return_value={
                     "manual": manual, "auto": auto, "source": source})
-                with patch("druta.dpg.does_item_exist",
+                with patch("druta.druta.dpg.does_item_exist",
                            side_effect=lambda tag: tag in app._ctl_widgets), \
-                     patch("druta.dpg.configure_item") as configure:
+                     patch("druta.druta.dpg.configure_item") as configure:
                     app.sync_lock_ui()
                 got = {c.args[0]: c.kwargs["enabled"] for c in configure.call_args_list}
                 self.assertEqual(got, {"sl_fan": manual, "in_fan": manual,
@@ -119,7 +119,7 @@ class GpuSwitchTests(unittest.TestCase):
                 app.build_ui = Mock()
                 kwargs = ({"side_effect": failure} if isinstance(failure, Exception)
                           else {"return_value": failure})
-                with patch("druta.GPU", **kwargs):
+                with patch("druta.druta.GPU", **kwargs):
                     self.assertFalse(app.swap_gpu(self.TARGET))
                 self.assertIs(app.gpu, original_gpu)
                 self.assertIs(app.vf_points, original_points)
@@ -143,9 +143,9 @@ class GpuSwitchTests(unittest.TestCase):
                 points_before = app.vf_points
                 work_before = dict(app.vf_work)
                 app.gpu.read_vf_curve = Mock(return_value=([], "invalid V/F response"))
-                with patch("druta.dpg.does_item_exist", return_value=True), \
-                        patch("druta.dpg.set_value") as value, \
-                        patch("druta.dpg.configure_item") as configure:
+                with patch("druta.druta.dpg.does_item_exist", return_value=True), \
+                        patch("druta.druta.dpg.set_value") as value, \
+                        patch("druta.druta.dpg.configure_item") as configure:
                     app.vf_read(force=True)
                 prefix = ("Curve refresh failed; showing previous read: "
                           if previous_curve else "Curve unavailable: ")

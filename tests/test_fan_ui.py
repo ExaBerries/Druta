@@ -3,7 +3,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from druta import Druta
+from druta.druta import Druta
 
 
 class FanSliderRestoreTests(unittest.TestCase):
@@ -16,8 +16,8 @@ class FanSliderRestoreTests(unittest.TestCase):
             read_fan_control_state=Mock(return_value={"fans": fans} if fans else None))
         app.log = Mock()
         app.sync_knob_boxes = Mock()
-        with patch("druta.dpg.does_item_exist", side_effect=lambda tag: tag == "sl_fan"), \
-                patch("druta.dpg.set_value") as setter:
+        with patch("druta.druta.dpg.does_item_exist", side_effect=lambda tag: tag == "sl_fan"), \
+                patch("druta.druta.dpg.set_value") as setter:
             app.sync_sliders_from_gpu({"fan_manual": captured_manual, "fan_pct": 99})
         app.sync_knob_boxes.assert_called_once()
         return app, setter

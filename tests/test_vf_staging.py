@@ -9,7 +9,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from druta import Druta
+from druta.druta import Druta
 from druta.nvbackend import GPU
 
 
@@ -41,7 +41,7 @@ class VfStagingTests(unittest.TestCase):
                 points = [dict(idx=i, volt_mv=987.5 + i * 12.5,
                                freq_mhz=1911, delta_khz=0) for i in range(8)]
                 app = editor(divisor, step, points, gfx_max=1911)
-                with patch("druta.dpg.get_value", side_effect={
+                with patch("druta.druta.dpg.get_value", side_effect={
                         "rfloor": 1000, "vcap": 1062.5}.__getitem__):
                     app.vf_ramp()
                     self.assertIsNotNone(app.apply_plan())
@@ -58,7 +58,7 @@ class VfStagingTests(unittest.TestCase):
         points = [dict(idx=i, volt_mv=1000 + i * 12.5,
                        freq_mhz=f, delta_khz=0) for i, f in enumerate(clocks)]
         app = editor(2, 12657, points, gfx_max=1911)
-        with patch("druta.dpg.get_value", side_effect={
+        with patch("druta.druta.dpg.get_value", side_effect={
                 "rfloor": 1000, "vcap": 1093.75}.__getitem__):
             app.vf_ramp()
         self.assertEqual(app.wf(7), 1911000 + 3 * 12657)
@@ -77,9 +77,9 @@ class VfStagingTests(unittest.TestCase):
         applied = []
         app.vf_apply = Mock(side_effect=lambda **kw: applied.append(dict(app.vf_work)))
         app.hold_cap_point = Mock()
-        with patch("druta.dpg.get_value", side_effect={
+        with patch("druta.druta.dpg.get_value", side_effect={
                 "rfloor": 1000, "vcap": 1093.75}.__getitem__), \
-                patch("druta.dpg.does_item_exist", return_value=False):
+                patch("druta.druta.dpg.does_item_exist", return_value=False):
             app.oc_max()
         self.assertEqual(applied[0][7], 7 * 12657 * 2)
         self.assertEqual(app.wf(7), 1911000 + 7 * 12657)
@@ -144,7 +144,7 @@ class VfStagingTests(unittest.TestCase):
                 app.vf_work = {i: d + 2 * step * divisor
                                for i, d in app.vf_work.items()}
                 before = dict(app.vf_work)
-                with patch("druta.dpg.get_value", return_value=900):
+                with patch("druta.druta.dpg.get_value", return_value=900):
                     app.vf_deflatten()
                 self.assertEqual(app.vf_work[0], before[0])
                 for index in (1, 2):
@@ -156,7 +156,7 @@ class VfStagingTests(unittest.TestCase):
                 # The preview now has a unique boundary maximum; repeating the
                 # operation must not stack another offset or reinterpret raw units.
                 staged = dict(app.vf_work)
-                with patch("druta.dpg.get_value", return_value=900):
+                with patch("druta.druta.dpg.get_value", return_value=900):
                     app.vf_deflatten()
                 self.assertEqual(app.vf_work, staged)
                 app.push_undo.assert_called_once()
@@ -170,7 +170,7 @@ class VfStagingTests(unittest.TestCase):
                           for i in range(4)]
                 app = editor(divisor, step, points, gfx_max=1911)
                 before = dict(app.vf_work)
-                with patch("druta.dpg.get_value", return_value=1000):
+                with patch("druta.druta.dpg.get_value", return_value=1000):
                     app.vf_deflatten()
                 expected = dict(before)
                 expected[1] -= step * divisor

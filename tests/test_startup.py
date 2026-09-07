@@ -109,7 +109,7 @@ class StartupRecovery(unittest.TestCase):
 
     def test_attempt_marker_failure_prevents_application(self):
         self.enable()
-        with patch("startup.atomic_json", side_effect=OSError("disk full")):
+        with patch("druta.startup.atomic_json", side_effect=OSError("disk full")):
             manager, request = self.manager(True)
         self.assertIsNone(request)
         self.assertTrue(manager.failed)
@@ -221,8 +221,8 @@ class WindowsIntegration(unittest.TestCase):
         self.assertNotIn("RestartOnFailure", xml)
 
     def test_frozen_launch_uses_current_executable(self):
-        with patch("startup.sys.frozen", True, create=True), \
-                patch("startup.sys.executable", r"C:\portable Druta\Druta.exe"):
+        with patch("druta.startup.sys.frozen", True, create=True), \
+                patch("druta.startup.sys.executable", r"C:\portable Druta\Druta.exe"):
             self.assertEqual(startup.launch_command(), [r"C:\portable Druta\Druta.exe", "--startup-profile"])
 
     def test_real_process_owned_window_receives_shutdown_and_cancellation(self):

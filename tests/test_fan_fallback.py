@@ -196,7 +196,7 @@ class FanFallbackTests(unittest.TestCase):
         api = ClientFans()
         api.FanCoolersSetControl = Mock(return_value=0)
         gpu = with_native(api)
-        with patch("nvbackend.time.sleep"):
+        with patch("druta.nvbackend.time.sleep"):
             ok, message = gpu.set_fan(50)
         self.assertFalse(ok)
         self.assertIn("did not read back", message)

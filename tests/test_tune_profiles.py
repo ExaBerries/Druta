@@ -8,7 +8,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from druta import profiles, Druta
+from druta.druta import profiles, Druta
 
 
 def hardware():
@@ -194,8 +194,8 @@ class ProfileFlow(unittest.TestCase):
             setattr(self.app, method, Mock())
         self.app.autosave_before = Mock(return_value=True)
 
-    @patch("druta.dpg.configure_item")
-    @patch("druta.dpg.set_value")
+    @patch("druta.druta.dpg.configure_item")
+    @patch("druta.druta.dpg.set_value")
     def test_startup_waits_for_i2c_verify_and_restores_saved_modes(self, values, _configure):
         self.app.verify_i2c_rail = lambda: setattr(self.app, "_i2c_busy", True)
         self.app.begin_profile_load("test", self.state, automatic=True)
@@ -210,8 +210,8 @@ class ProfileFlow(unittest.TestCase):
         self.gpu.apply_vf_deltas.assert_called_once()
         self.app._startup_manager.block.assert_not_called()
 
-    @patch("druta.dpg.configure_item")
-    @patch("druta.dpg.set_value")
+    @patch("druta.druta.dpg.configure_item")
+    @patch("druta.druta.dpg.set_value")
     def test_failed_verification_blocks_startup_without_applying(self, *_):
         self.app.verify_i2c_rail = lambda: setattr(self.app, "_i2c_busy", True)
         self.app.begin_profile_load("test", self.state, automatic=True)
@@ -228,7 +228,7 @@ class ProfileFlow(unittest.TestCase):
 
     def test_switch_refused_during_profile_verification(self):
         self.app._profile_pending = ("test", self.state, True)
-        with patch("druta.GPU") as constructor:
+        with patch("druta.druta.GPU") as constructor:
             self.assertFalse(self.app.swap_gpu("0000:02:00.0"))
         constructor.assert_not_called()
 
@@ -237,8 +237,8 @@ class ProfileFlow(unittest.TestCase):
         self.app.reset_all()
         self.app.autosave_before.assert_not_called()
 
-    @patch("druta.dpg.set_value")
-    @patch("druta.dpg.does_item_exist", return_value=True)
+    @patch("druta.druta.dpg.set_value")
+    @patch("druta.druta.dpg.does_item_exist", return_value=True)
     def test_rail_and_additional_memory_widgets_follow_live_readback(self, _exists, value):
         Druta.sync_profile_rail_sliders(self.app)
         value.assert_any_call("sl_rail", 12)

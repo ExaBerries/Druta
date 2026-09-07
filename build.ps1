@@ -55,8 +55,8 @@ function Get-SourceSnapshot {
     $paths = @(
         'src/druta/app.py', 'src/druta/druta.py', 'src/druta/nvbackend.py', 'src/druta/gpuload.py', 'src/druta/profiles.py', 'src/druta/startup.py',
         'src/druta/railctl.py', 'src/druta/shuntmod.py', 'src/druta/timings.py', 'src/druta/timingwrite.py',
-        'src/druta/__init__.py', 'src/druta/__main__.py',
-        'Druta.spec', 'build.ps1', 'requirements.txt', 'pyproject.toml',
+        'src/druta/__init__.py', 'Druta.spec', 'build.ps1',
+        'requirements.txt', 'pyproject.toml',
         'COPYING', 'THIRD-PARTY-NOTICES.md', 'README.md',
         'MANUAL.md', 'TECHNICALDOCUMENTATION.md', 'DEBUG-SUMMARY-RTX5080.md',
         'VOLTAGE-RAILS-TITAN.md', 'VOLTAGE-RAILS-47212.md', 'DRIVER-COMPATIBILITY.md',
