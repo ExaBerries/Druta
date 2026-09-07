@@ -11,6 +11,26 @@ from nvbackend import GPU, ResetStep
 
 
 class LegacyP0UiTests(unittest.TestCase):
+    def test_p0_copy_uses_current_cards_measured_behavior(self):
+        from test_legacy_p0 import card
+        from nvbackend import GPU
+        gpu = card()
+        self.app.gpu = gpu
+        text = self.app.legacy_p0_measurement()
+        self.assertIn("GTX 745", text)
+        self.assertIn("540 MHz", text)
+        self.assertIn("1072 MHz", text)
+        gpu.arch.return_value = GPU.ARCH_KEPLER
+        gpu.nvapi.selected = {"devid": 0x1188, "subsys": 0x84061043}
+        gpu.static = {"driver": "472.12", "vbios": "80.04.1e.00.18"}
+        text = self.app.legacy_p0_measurement()
+        self.assertIn("GTX 690", text)
+        self.assertIn("705 MHz", text)
+        self.assertIn("1201 MHz", text)
+        self.assertNotIn("GTX 745", text)
+        gpu.static["driver"] = "unknown"
+        self.assertNotIn("705 MHz", self.app.legacy_p0_measurement())
+
     def setUp(self):
         for name, kwargs in (("does_item_exist", {"return_value": False}),
                              ("set_value", {}), ("configure_item", {})):

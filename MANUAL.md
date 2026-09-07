@@ -52,10 +52,11 @@ This mode is actually the opposite of deflatten. It flattens everything after 80
 
 Had enough with boring sliders to the maximum? Click "max it". It does the V/F deflatten, maxes out the voltage boost, power limit, fan, and holds at 1093mv all in one click. You click it once, and the rest is the actual part of overclocking: changing the frequency. 
 
-On the verified GTX 745 with driver 472.12, this position instead has a yellow
-**Lock P0 and max fan** button. It holds P0 and sets manual fan duty to 100%.
-The core can run around 540 MHz even under load, so this is for keeping the
-memory performance state steady rather than maximizing the core clock.
+On the verified GTX 745 and GTX 690 with driver 472.12, this position instead
+has a yellow **Lock P0 and max fan** button. It holds P0 and sets manual fan
+duty to 100%. Loaded core clocks were about 540 MHz on GTX 745 and 705 MHz
+on GTX 690; this keeps memory in its top band without maximizing core boost.
+The GTX 690 shares one blower between its two GPU cores.
 **Release P0** drops the hold; **Auto** restores automatic fan control.
 **Undo last write** restores the saved fan policy while retaining the P0 hold.
 **Reset all to stock** releases the hold and restores Auto; closing Druta

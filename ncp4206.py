@@ -1,12 +1,13 @@
 # Copyright (C) 2026 Thermetery Technology Co Limited
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""NCP4206 absolute VID control, scoped to the measured GTX 770 board.
+"""NCP4206 absolute VID control, identified on a Kepler GPU's I2C bus.
 
 Public source: onsemi NCP4206 datasheet, Table 10/11 and Voltage Control Mode.
 Only VOUT_COMMAND and bit 3 of the paired VR Config registers are writable.
 No calibration, protection, nonvolatile, or phase-control fields are changed.
 """
 import math
+import statistics
 import threading
 import time
 from types import SimpleNamespace
@@ -15,6 +16,13 @@ from railctl import Rail, _linear11
 NORMAL_MAX_MV = 1281
 XOC_MAX_MV = 2000
 MIN_MV = 600
+DISCOVERY_PORTS = (2, 0, 1, 3, 4, 5, 6, 7)
+# onsemi NCP4206 datasheet Table 11 (p.27) default, plus the OEM identity
+# measured on GTX 770 and both GTX 690 controllers. Do not accept every
+# onsemi manufacturer ID as this controller: model AND revision must match.
+OEM_IDENTITY = (0x41, 0x3298, 0x01)
+DEFAULT_IDENTITY = (0x41, 0x0208, 0x03)
+IDENTITIES = (OEM_IDENTITY, DEFAULT_IDENTITY)
 
 
 def decode_vid(code):
@@ -33,23 +41,42 @@ def encode_vid(mv):
 class NCP4206(Rail):
     absolute_voltage = True
 
-    def __init__(self, nvapi):
-        recipe = {'kind': 'ncp4206-absolute-v1', 'port': 2, 'addr7': 32,
-                  'identity': [65, 12952, 1], 'normal_max': NORMAL_MAX_MV,
+    def __init__(self, nvapi, *, architecture=None, port=2):
+        if type(port) is not int or port not in DISCOVERY_PORTS:
+            raise ValueError('NCP4206 discovery supports only I2C ports 0..7')
+        self.architecture = architecture
+        self._identity = None
+        recipe = {'kind': 'ncp4206-absolute-v1', 'port': port, 'addr7': 32,
+                  'identity': None, 'normal_max': NORMAL_MAX_MV,
                   'xoc_max': XOC_MAX_MV, 'vid_max': 1600, 'min_mv': MIN_MV}
-        p = SimpleNamespace(name='GTX 770 - NVVDD (NCP4206)', regulator='NCP4206',
-                            rail='NVVDD', port=2, addr7=32, src=recipe,
+        p = SimpleNamespace(name=f'Kepler - NVVDD (NCP4206, port {port})', regulator='NCP4206',
+                            rail='NVVDD', port=port, addr7=32, src=recipe,
                             read_only=False, env_min=MIN_MV, env_max=NORMAL_MAX_MV,
                             hw_min_mv=MIN_MV, hw_max_mv=XOC_MAX_MV)
         super().__init__(p, nvapi)
         self._mutex = threading.RLock()
 
     def present(self):
-        identity = getattr(self.nvapi, 'selected', None) or {}
-        if identity.get('devid') != 0x1184 or identity.get('subsys') != 0x1033196e:
+        if self.architecture != 2 or not getattr(self.nvapi, 'ok', False):
             return False
-        return (self.read(0x99, 1), self.read(0x9a, 2), self.read(0x9b, 1),
-                self.read(0x20, 1)) == (65, 12952, 1, 32)
+        # Port/address ACKs alone never identify the regulator. Stop at the
+        # manufacturer mismatch so empty ports need only one driver round trip.
+        manufacturer = self.read(0x99, 1)
+        if manufacturer != 0x41:
+            return False
+        identity = (manufacturer, self.read(0x9a, 2), self.read(0x9b, 1))
+        if identity not in IDENTITIES or self.read(0x20, 1) != 32:
+            return False
+        if self._identity is not None:
+            return identity == self._identity
+        self._identity = identity
+        self.p.src['identity'] = list(identity)
+        # Preserve the saved-profile fingerprint for the original port-2 OEM
+        # recipe, while the visible name describes any identified Kepler card.
+        self.p.profile_name = ('GTX 770 - NVVDD (NCP4206)'
+                               if self.p.port == 2 and identity == OEM_IDENTITY
+                               else self.p.name)
+        return True
 
     def capture_control(self):
         if not self.present():
@@ -162,25 +189,72 @@ class NCP4206(Rail):
             return False, 'I2C verification requires acknowledgment', []
         with self._mutex:
             original = self.capture_control()
-            baseline = self.read_vout()
-            if baseline is None or not 800 <= baseline <= NORMAL_MAX_MV - 30:
-                return False, 'loaded rail lacks headroom for the bounded verification step', []
-            target = math.floor((baseline + 25) / 6.25) * 6.25
-            samples = []
-            result = (False, 'NCP4206 verification did not run', samples)
+
+            def sample(delay):
+                values = []
+                for _ in range(5):
+                    time.sleep(delay)
+                    values.append(self.read_vout())
+                return values
+
+            def complete(values):
+                return all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                           and math.isfinite(v) for v in values)
+
+            baseline_samples = sample(.05)
+            if not complete(baseline_samples):
+                return False, 'NCP4206 baseline voltage read failed; nothing written', []
+            baseline = statistics.median(baseline_samples)
+            noise = max(baseline_samples) - min(baseline_samples)
+            threshold = max(8.0, 2 * noise)
+            targets = sorted({math.floor((baseline + step) / 6.25) * 6.25
+                              for step in (25, 37.5, 50)})
+            targets = [target for target in targets
+                       if MIN_MV <= target <= NORMAL_MAX_MV
+                       and target >= baseline + threshold]
+            if not 800 <= baseline <= NORMAL_MAX_MV or not targets:
+                return False, 'loaded rail lacks headroom for the bounded verification staircase', []
+            ladder = []
+            result = (False, 'NCP4206 verification did not run', ladder)
             try:
-                ok, msg = self.set_voltage_mv(target, acknowledged=True)
-                if not ok:
-                    result = (False, msg, samples)
-                else:
-                    for _ in range(5):
-                        time.sleep(.15)
-                        samples.append(self.read_vout())
-                    valid = [v for v in samples if v is not None]
-                    moved = len(valid) == 5 and min(valid) >= baseline + 8 and all(abs(v-target) <= 15 for v in valid)
-                    result = (moved, f'NCP4206 {baseline:.2f} -> target {target:.2f} mV; VMON {valid}', samples)
+                for target in targets:
+                    rung = {'baseline_mv': baseline, 'baseline_samples_mv': baseline_samples,
+                            'noise_mv': noise, 'threshold_mv': threshold,
+                            'target_mv': target, 'samples_mv': [], 'moved': False}
+                    ladder.append(rung)
+                    ok, msg = self.set_voltage_mv(target, acknowledged=True)
+                    if not ok:
+                        rung['refused'] = msg
+                        result = (False, 'NCP4206 verification write refused: ' + msg, ladder)
+                        break
+                    samples = rung['samples_mv'] = sample(.15)
+                    if not complete(samples):
+                        rung['read_failed'] = True
+                        result = (False, 'NCP4206 verification voltage read failed', ladder)
+                        break
+                    # Loadline drop can leave VMON well below the requested
+                    # VID. Require a sustained rise above measured noise, not
+                    # closeness below the target. Overshoot still fails closed.
+                    overshoot = max(samples) > target + 15
+                    moved = not overshoot and min(samples) >= baseline + threshold
+                    rung.update(moved=moved, overshoot=overshoot,
+                                minimum_rise_mv=min(samples) - baseline)
+                    message = (f'NCP4206 {baseline:.2f} -> target {target:.2f} mV; '
+                               f'VMON {samples}; minimum rise {min(samples)-baseline:.2f} mV '
+                               f'(need {threshold:.2f} mV)')
+                    if log:
+                        log(message + ('; MOVED' if moved else '; overshoot' if overshoot else '; flat'))
+                    result = (moved, message + ('' if moved else
+                              '; overshoot rejected' if overshoot else '; no confirmed response'), ladder)
+                    if moved or overshoot:
+                        break
+            except Exception as exc:
+                result = (False, f'NCP4206 verification failed: {exc}', ladder)
             finally:
-                ok, msg = self.restore_control(original, recovery=True)
+                try:
+                    ok, msg = self.restore_control(original, recovery=True)
+                except Exception as exc:
+                    ok, msg = False, str(exc)
             if not ok:
-                return False, 'NCP4206 verification restoration failed: ' + msg, samples
+                return False, 'NCP4206 verification restoration failed: ' + msg, ladder
             return result

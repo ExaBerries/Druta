@@ -15,6 +15,31 @@ def card():
  return g
 
 class LegacyP0Backend(unittest.TestCase):
+ def test_gtx690_exact_profile_and_per_gpu_force_release(self):
+  for handle in (69004,69005):
+   g=card();g.arch.return_value=2;g.nvapi.gpu=handle
+   g.nvapi.selected={'devid':0x1188,'subsys':0x84061043}
+   g.static={'driver':'472.12','vbios':'80.04.1E.00.18'}
+   g.read.return_value={'pstate':0,'core':705,'mem':3004,'mem_p0max':3004}
+   self.assertEqual(g.legacy_p0_profile()['held_core_mhz'],705)
+   with patch('nvbackend.time.sleep'):self.assertTrue(g.hold_legacy_p0()[0])
+   self.assertTrue(g.release_legacy_p0()[0])
+   self.assertEqual([c.args[0] for c in g.nvapi.ForcePstate.call_args_list],[handle,handle])
+   self.assertEqual([[v.value for v in c.args[1:]] for c in g.nvapi.ForcePstate.call_args_list],[[0,2],[16,2]])
+ def test_gtx690_nearby_boards_and_other_driver_remain_unverified(self):
+  for field,value in [('driver','473.81'),('vbios','80.04.1e.00.19'),('subsys',0x84081043),('devid',0x1184),('arch',3)]:
+   g=card();g.arch.return_value=2
+   g.nvapi.selected={'devid':0x1188,'subsys':0x84061043}
+   g.static={'driver':'472.12','vbios':'80.04.1e.00.18'}
+   if field=='arch':g.arch.return_value=value
+   elif field in g.static:g.static[field]=value
+   else:g.nvapi.selected[field]=value
+   self.assertIsNone(g.legacy_p0_profile());self.assertFalse(g.hold_legacy_p0()[0])
+   g.nvapi.ForcePstate.assert_not_called()
+ def test_gtx745_profile_retains_its_own_measurements(self):
+  g=card();self.assertEqual(g.legacy_p0_profile()['name'],'GTX 745')
+  self.assertEqual(g.legacy_p0_profile()['held_core_mhz'],540)
+  self.assertEqual(g.legacy_p0_profile()['boost_core_mhz'],1072)
  def test_only_validated_board_driver_and_firmware_can_write(self):
   for field,value in [('driver','580.97'),('vbios','other'),('vbios',None),('subsys',0),('devid',0x1184)]:
    g=card()

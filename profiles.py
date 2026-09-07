@@ -187,7 +187,8 @@ def capture(gpu, rail=None):
 def rail_identity(rail):
     """Pin bus addressing AND the complete, locally validated regulator recipe."""
     encoded = json.dumps(rail.p.src, sort_keys=True, default=str).encode("utf-8")
-    return {"profile": rail.p.name, "sha256": hashlib.sha256(encoded).hexdigest(),
+    return {"profile": getattr(rail.p, "profile_name", rail.p.name),
+            "sha256": hashlib.sha256(encoded).hexdigest(),
             "port": rail.p.port, "addr7": rail.addr7, "rail": rail.p.rail}
 
 
@@ -240,7 +241,9 @@ def capture_rails(gpu, state, rail):
     if rail is not None and not rail.p.read_only:
         try:
             if getattr(rail, "absolute_voltage", False):
-                state["i2c"] = dict(rail_identity(rail), control=rail.capture_control())
+                control = rail.capture_control()
+                state["i2c"] = dict(rail_identity(rail), control=control,
+                                    display_name=rail.p.name)
             else:
                 offset = rail.telemetry().get("offset_mv")
                 if offset is None:
@@ -595,7 +598,8 @@ def summarize(state):
             from ncp4206 import decode_vid
             control = i2c["control"]
             target = (f"{decode_vid(control['command']):g} mV" if control['enabled'] else 'Auto (GPU VID)')
-            bits.append(f"I2C {i2c['rail']} {target} ({i2c['profile']})")
+            label = i2c.get("display_name") or i2c['profile']
+            bits.append(f"I2C {i2c['rail']} {target} ({label})")
         else:
             bits.append(f"I2C {i2c['rail']} {i2c['offset_mv']:+g} mV ({i2c['profile']})")
     for key, value in (state.get("clock_domain_offsets_mhz") or {}).items():

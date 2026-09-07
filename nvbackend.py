@@ -3360,22 +3360,33 @@ class GPU:
     def reset_gpu_clocks(self):
         return self._reset_gpu_clocks()
 
-    def legacy_p0_supported(self):
-        """Only the board/driver with measured force AND release behavior.
+    # Exact board/firmware/driver combinations with force AND release measured.
+    # These hold the top memory band, but reduce core clocks under load.
+    LEGACY_P0_PROFILES = {
+        (ARCH_MAXWELL, 0x1382, 0x6893103C, "472.12", "82.07.32.00.6a"):
+            {"name": "GTX 745", "driver": "472.12",
+             "held_core_mhz": 540, "boost_core_mhz": 1072},
+        (ARCH_KEPLER, 0x1188, 0x84061043, "472.12", "80.04.1e.00.18"):
+            {"name": "GTX 690", "driver": "472.12",
+             "held_core_mhz": 705, "boost_core_mhz": 1201},
+    }
 
-        This holds the performance state, not a maximum graphics frequency.
-        The tested GM107 stays at 540 MHz under the checked CUDA workload.
-        Kepler and other Maxwell boards still need their own verification.
-        """
+    def legacy_p0_profile(self):
+        """Measured behavior for this exact GPU/driver, or None if unverified."""
         api = getattr(self, "nvapi", None)
+        if not (api and api.ok and getattr(api, "ForcePstate", None)
+                and not getattr(self, "pairing_error", None)):
+            return None
         card = getattr(api, "selected", None) or {}
         static = getattr(self, "static", {})
-        return bool(api and api.ok and getattr(api, "ForcePstate", None)
-                    and not getattr(self, "pairing_error", None)
-                    and self.is_gtx745()
-                    and card.get("subsys") == 0x6893103C
-                    and static.get("driver") == "472.12"
-                    and str(static.get("vbios") or "").lower() == "82.07.32.00.6a")
+        key = (self.arch(), card.get("devid"), card.get("subsys"),
+               static.get("driver"), str(static.get("vbios") or "").lower())
+        profile = self.LEGACY_P0_PROFILES.get(key)
+        return dict(profile) if profile is not None else None
+
+    def legacy_p0_supported(self):
+        """Only a measured board/firmware/driver combination may force P0."""
+        return self.legacy_p0_profile() is not None
 
     def legacy_p0_owned(self):
         """Session ownership, not a claim to read another tuner's force state."""
@@ -3927,7 +3938,10 @@ class GPU:
             return False, "; ".join(errors)
         # Automatic requested levels can update asynchronously with temperature.
         # Manual requests and every policy must agree once the driver settles.
-        for attempt in range(5):
+        # GTX 690 / R472 updates the requested cooler state on roughly a
+        # one-second cadence. Keep checking the policy and level (not RPM),
+        # allowing two seconds before declaring an accepted write unverified.
+        for attempt in range(21):
             if current["source"] == "nvml":
                 after = self.read_fan_control_state()
             else:
@@ -3939,8 +3953,8 @@ class GPU:
                     (row["level"] == level if manual else row["policy"] == policy)
                     for row, (fan_id, level, manual, policy) in zip(after["fans"], plan)):
                 return True, "fan control state restored"
-            if attempt < 4:
-                time.sleep(0.05)
+            if attempt < 20:
+                time.sleep(0.1)
         return False, "fan write accepted but requested policy/level did not read back"
 
     def _set_nvapi_fans(self, pct=None):

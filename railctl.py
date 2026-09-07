@@ -257,12 +257,12 @@ class Profile:
         return None if self.read_only else self.raw_max * self.lsb_mv
 
     def candidate_for(self, dev_id=None, subsys=None):
-        """PCI ids narrow the candidates. They never decide - identity does."""
-        if self.pci_device and dev_id is not None:
-            if f"0x{dev_id:04x}" not in self.pci_device:
+        """Require known matching PCI ids, then verify identity on the bus."""
+        if self.pci_device:
+            if dev_id is None or f"0x{dev_id:04x}" not in self.pci_device:
                 return False
-        if self.pci_subsys and subsys is not None:
-            if f"0x{subsys:08x}" not in self.pci_subsys:
+        if self.pci_subsys:
+            if subsys is None or f"0x{subsys:08x}" not in self.pci_subsys:
                 return False
         return True
 
@@ -805,20 +805,50 @@ class Rail:
         ), ladder
 
 
-def find(nvapi, dev_id=None, subsys=None, log=None):
+def find(nvapi, dev_id=None, subsys=None, log=None, *, architecture=None):
     """The one Rail whose identity passes on this card, or None.
 
-    Candidates are narrowed by PCI id and decided by a read on the actual bus.
+    Kepler NCP4206 discovery uses controller identity without a PCI whitelist.
+    Generic profiles are then narrowed by the selected GPU's PCI ids and
+    decided by a read on its actual bus. Explicit ids may fill missing fields,
+    but must not contradict the handle for generic profile selection.
     If two profiles both identify, the first wins and the clash is logged -
     silently picking one of two descriptions of the same regulator is how a
     board ends up driven by the wrong bounds.
     """
-    from ncp4206 import NCP4206
-    ncp = NCP4206(nvapi)
-    if ncp.present():
-        if log:
-            log("i2c rail: NCP4206 absolute NVVDD control at 0x20/port 2", True)
-        return ncp
+    from ncp4206 import DISCOVERY_PORTS, NCP4206
+    if architecture == 2 and getattr(nvapi, "ok", False):
+        ncp_hits = []
+        for port in DISCOVERY_PORTS:
+            ncp = NCP4206(nvapi, architecture=architecture, port=port)
+            if ncp.present():
+                ncp_hits.append(ncp)
+        # Matching identities on separate ports may be aliases, or separate
+        # regulators. Reads cannot establish which rail a write would change.
+        if len(ncp_hits) > 1:
+            if log:
+                ports = ", ".join(str(r.p.port) for r in ncp_hits)
+                log(f"i2c NCP4206 identified on multiple ports ({ports}); "
+                    "rail selection is ambiguous, control remains unavailable", False)
+            return None
+        if ncp_hits:
+            ncp = ncp_hits[0]
+            if log:
+                log("i2c rail: NCP4206 absolute NVVDD control at "
+                    f"0x20/port {ncp.p.port}", True)
+            return ncp
+    selected = getattr(nvapi, "selected", None) or {}
+    for key, supplied in (("devid", dev_id), ("subsys", subsys)):
+        actual = selected.get(key)
+        if supplied is not None and actual is not None and supplied != actual:
+            if log:
+                log(f"i2c profile scan refused: supplied {key} does not match "
+                    "the selected GPU", False)
+            return None
+    if dev_id is None:
+        dev_id = selected.get("devid")
+    if subsys is None:
+        subsys = selected.get("subsys")
     hits = []
     for p in load_profiles(log=log):
         if not p.candidate_for(dev_id, subsys):

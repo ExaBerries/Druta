@@ -9,7 +9,7 @@ from test_tune_profiles import hardware
 
 class NCPTests(unittest.TestCase):
     def rail(self):
-        r=n.NCP4206(SimpleNamespace(selected={'devid':0x1184,'subsys':0x1033196e}))
+        r=n.NCP4206(SimpleNamespace(ok=True, selected={'devid':0x1184,'subsys':0x1033196e}), architecture=2)
         r.regs={0x99:65,0x9a:12952,0x9b:1,0x20:32,0x21:0,0xd2:0x72,0xd3:0x72,0xdd:3,0xd7:47726}
         r.read=lambda reg,width:r.regs.get(reg)
         r.calls=[]
@@ -59,6 +59,8 @@ class NCPTests(unittest.TestCase):
         auto=profiles.capture(gpu,r)
         self.assertIn('control',auto['i2c']);self.assertNotIn('offset_mv',auto['i2c'])
         self.assertIn('Auto (GPU VID)',profiles.summarize(auto))
+        self.assertIn('Kepler',profiles.summarize(auto))
+        self.assertNotIn('GTX 770',profiles.summarize(auto))
         self.assertTrue(r.set_voltage_mv(1250,acknowledged=True)[0])
         target=profiles.capture(gpu,r)
         self.assertIn('1250 mV',profiles.summarize(target))

@@ -497,14 +497,23 @@ class Druta:
     # ---- telemetry thread ------------------------------------------------- #
     def poll_loop(self):
         while not self._stop.is_set():
+            with self._lock:
+                gen, gpu = self._gpu_gen, self.gpu
             try:
-                d = self.gpu.read()
+                d = gpu.read()
                 with self._lock:
-                    self._snap, self._snap_err = d, None
-                    self._snap_t = time.monotonic()
+                    # A driver read may finish after a card switch. Never
+                    # display that card's measurements under the new card's
+                    # name, or decode them with the new memory divisor.
+                    if (gen == self._gpu_gen and gpu is self.gpu
+                            and not self._rebuilding):
+                        self._snap, self._snap_err = d, None
+                        self._snap_t = time.monotonic()
             except Exception as e:
                 with self._lock:
-                    self._snap_err = str(e)
+                    if (gen == self._gpu_gen and gpu is self.gpu
+                            and not self._rebuilding):
+                        self._snap_err = str(e)
             self._stop.wait(1.0)
 
     # ---- fonts ------------------------------------------------------------ #
@@ -1819,14 +1828,14 @@ class Druta:
                         dpg.add_text(
                             "Holds P0, verifies the hold, then sets fan duty to 100%.\n"
                             "Clock offsets, power and voltage settings stay as set.\n\n"
-                            "Measured on GTX 745 / 472.12: the hold ran the core at\n"
-                            "540 MHz even under load, versus 1072 MHz with normal\n"
-                            "boost. This is a performance-state hold, not maximum\n"
+                            + self.legacy_p0_measurement() + ".\n"
+                            "This is a performance-state hold, not maximum\n"
                             "boost. It keeps memory in its top band for timing work.\n\n"
                             "Undo last write restores the fan but leaves P0 held.\n"
                             "Release P0, Clocks > Release, Reset all, or exit drops\n"
                             "the hold. Fan duty stays manual until Auto or Reset all.\n"
-                            "If setting the fan fails, a newly acquired hold is released.")
+                            "If setting the fan fails, a newly acquired hold is released.",
+                            wrap=self.s(540))
                     dpg.add_button(label="Release P0", tag="go_p0release",
                                    callback=self.release_p0,
                                    width=self.s(110), height=self.s(28))
@@ -2546,7 +2555,8 @@ class Druta:
         if railctl is None:
             return
         try:
-            self.rail = railctl.find(self.gpu.nvapi, log=self.log)
+            self.rail = railctl.find(self.gpu.nvapi, log=self.log,
+                                     architecture=self.gpu.arch())
         except Exception as e:                                  # noqa: BLE001
             self.log(f"i2c profile scan failed: {type(e).__name__}: {e}", False)
 
@@ -2872,6 +2882,15 @@ class Druta:
         """Only a backend-confirmed board/driver pair may expose P0 writes."""
         return bool(getattr(self.gpu, "legacy_p0_supported", lambda: False)())
 
+    def legacy_p0_measurement(self):
+        """Card-specific evidence shared by the button tooltip and hold banner."""
+        profile = getattr(self.gpu, "legacy_p0_profile", lambda: None)()
+        if not profile:
+            return "Maximum core boost is not guaranteed by a performance-state hold"
+        return (f"{profile['name']} / {profile['driver']}: measured core "
+                f"{profile['held_core_mhz']} MHz under load "
+                f"(normal boost {profile['boost_core_mhz']} MHz)")
+
     def sync_legacy_p0_lock(self, verified=None):
         """Keep even a failed request visible when its cleanup did not release."""
         if self.gpu.legacy_p0_owned():
@@ -3119,8 +3138,8 @@ class Druta:
         elif state and state["kind"] == self.LOCK_P0:
             txt = (("HOLD  legacy P0 hold" if state.get("verified") else
                     "HOLD  legacy P0 request remains after failed verification / release")
-                   + "  •  GTX 745 / 472.12 measured core 540 MHz under load "
-                     "(normal boost 1072 MHz)  •  Release P0 drops the hold")
+                   + "  •  " + self.legacy_p0_measurement()
+                   + "  •  Release P0 drops the hold")
         elif state:
             txt = (f"clock locked to [{state['lo']}..{state['hi']}] MHz from the "
                    f"Clocks menu (NVML locked clocks) - no V/F point is held")
@@ -7113,8 +7132,8 @@ deliberately does not put behind a button."""
         comes back through the same code that derived it correctly at startup,
         so there is no list of widgets to keep in step (see build_body).
 
-        Runs on the UI thread - DPG dispatches callbacks inside
-        render_dearpygui_frame - so no frame can be drawn against a half-built
+        Runs on the UI thread - run() drains DPG's manual callback queue before
+        refreshing or rendering - so no frame can be drawn against a half-built
         tree. The background workers are handled by the generation stamp rather
         than by blocking, because an induce can hold the card for 25 s and
         refusing to switch for that long would be worse than dropping its
@@ -7133,8 +7152,11 @@ deliberately does not put behind a button."""
         except Exception as exc:
             self.log(f"cannot switch to {slot}: {exc}", False)
             return False
-        self._gpu_gen += 1
-        self._rebuilding = True
+        # Synchronize invalidation with the telemetry worker's publication.
+        # Driver reads stay outside this lock so switching remains responsive.
+        with self._lock:
+            self._gpu_gen += 1
+            self._rebuilding = True
         try:
             self.reset_card_state()
             self.gpu = fresh
@@ -7147,7 +7169,8 @@ deliberately does not put behind a button."""
             self._i2c_verified = False
             self.build_ui(rebuild=True)
         finally:
-            self._rebuilding = False
+            with self._lock:
+                self._rebuilding = False
         st = self.gpu.static
         if len(self.gpu_list) > 1:
             dpg.set_viewport_title(f"Thermetery Druta {__version__}  -  {st.get('name')}  "
@@ -8376,6 +8399,10 @@ deliberately does not put behind a button."""
             _tell("No GPU backend: " + self.gpu.status_line())
             return
         dpg.create_context()
+        # DPG defaults to a callback worker thread. Card switches rebuild the
+        # widget tree, so callbacks must finish on this thread before refresh
+        # and rendering touch that tree. Timing/telemetry workers stay separate.
+        dpg.configure_app(manual_callback_management=True)
         self._dpg_ready = True
         # Taller than the old 860: the Monitor tab gained the all-domains
         # table, and relayout() only divides up whatever the viewport gives it
@@ -8459,6 +8486,9 @@ deliberately does not put behind a button."""
         try:
             while dpg.is_dearpygui_running():
                 if self._startup_manager and self._startup_manager.ending:
+                    break
+                dpg.run_callbacks(dpg.get_callback_queue())
+                if not dpg.is_dearpygui_running():
                     break
                 self.poll_profile_load()
                 now = time.perf_counter()
