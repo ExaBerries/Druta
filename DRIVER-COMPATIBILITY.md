@@ -21,7 +21,7 @@ column describes the TITAN boards; GTX 770 and GTX 745 were tested only on 472.1
 | NVVDD rail offsets and all four limits | Confirmed; see voltage measurements below | Confirmed, including each live ceiling clamp and idle floor | Confirmed, including each live ceiling clamp; floor uses verified legacy re-send | Private layout unvalidated; controls blocked | Unvalidated private layout; writes blocked |
 | Per-domain clock offsets | Confirmed for mapped controls | XBAR, Additional Memory Clock Offset, SYS, VIDEO and LTC each moved by about +30 MHz under load | Additional Memory Clock Offset +25 MHz moved reported memory by +20.25 MHz twice; other paired controls remain hidden | Unvalidated; private controls hidden, including Additional Memory Clock Offset | No confirmed pairing; hidden |
 | Power limit and voltage boost | Confirmed | Confirmed with independent readback | Confirmed with independent readback | NVML power-limit range and voltage-boost getter unavailable; sliders hidden | Power-limit range and voltage-boost getter unavailable; sliders hidden |
-| NVML frequency lock | Works on Turing; unsupported on Pascal | Confirmed at 1500 MHz under load; legacy RM readback also sees another process's range | Unsupported baseline; V/F point lock remains available | GPU 1176..1176 MHz and memory 3505..3505 MHz both return Not Supported (3), while elevated | GPU 1072 MHz / memory 900 MHz locks return Not Supported; application-clock getters return 1032 / 900 MHz (setter untested) |
+| NVML frequency lock | Works on Turing; unsupported on Pascal | Confirmed at 1500 MHz under load; legacy RM readback also sees another process's range | Unsupported baseline; V/F point lock remains available | GPU 1176..1176 MHz and memory 3505..3505 MHz both return Not Supported (3), while elevated | GPU 1072 MHz / memory 900 MHz locks return Not Supported through NVML and nvidia-smi; application-clock writes/readback succeed but do not hold P0 |
 | Profiles, Undo, Reset all and Max it | Existing composite actions | All 13 UI callback checks passed; exact controls/table/lock restoration | All 13 UI callback checks passed; exact controls/table/lock restoration | Profiles omit the inapplicable V/F table; Reset all skips curve writes; Max it hidden. Core/memory/fan and I2C restoration verified separately; default profile replay covered by hardware-free tests | Full profile replay restored +40 core, zero memory offset and manual 100% fan; no V/F requirement |
 | I2C regulator control | Board/tool dependent | MP2888A verified under load: +75 mV request moved rail-minus-VID by +45 mV; original raw value restored | No matching regulator found on this board | NCP4206 absolute target verified at 1250/1262.5 mV; Auto and profile restoration exact | No matching registered profile found; no voltage writes |
 | Memory timing capture and writes | Board/tool dependent | Capture works; FAW 16→17 is dropped by hardware and reported as dropped | Capture, FAW 24→25 write, and exact restore confirmed | Capture and 15 delay fields verified; exact restoration; CL 18→19 triggered driver recovery (details below) | All 33 timing fields queried; 16 delay fields accepted +1 and restored across both partitions; CL queried only; zero-value restore caveat below |
@@ -44,6 +44,41 @@ were restored. These short checks do not establish maximum clocks or stability.
 No voltage or CAS-latency writes were made. Windows sign-in replay is untested.
 
 The subsequent [full timing query and bounded sweep](experiments/maxwell-gtx745-timing-sweep-47212.md) verified 16 writable delay fields and exact final restoration with 270 checked transfers. CCDL/CCDS start at zero; nvtune warns on restoring zero despite allowing a +1 test. CCDL restored on a P-state transition; CCDS used an exact-original restoration override. Latency/preamble/protocol, structural/split, inferred and warning-producing fields remain query-only.
+
+## Legacy P0 mechanisms on GTX 745
+
+The [P0-path measurements](experiments/maxwell-gtx745-p0-paths-47212.json)
+separate performance-state forcing from frequency locking:
+
+- NVML GPU/memory clock locks and `nvidia-smi -lgc/-lmc` are unsupported.
+  The CLI prints that warning but exits with status 0, so its exit code alone
+  must not be interpreted as a successful lock.
+- `NvAPI_GPU_SetForcePstate` (query ID `0x025BFB10`, handle/state/fallback)
+  accepts `(0,2)` and holds idle P0 with DDR3 at 900 MHz. Two force/release
+  cycles passed; `(16,2)` returns to automatic P8 idle at 135/405 MHz.
+  However, the core stays at **540 MHz under the checked CUDA workload**,
+  compared with 1072 MHz without the force. Fallback 1 behaves the same when
+  explicitly forcing state 0. Automatic state 16/fallback 1 permits normal
+  boosting but does not hold idle P0. All 95 checked transfers in the three
+  loaded force/fallback tests passed without mismatches.
+- Application-clock setter requests succeed and read back. A 900/1007 MHz
+  memory/core request still idles at P8 and reaches 1072 MHz under load, so it
+  is neither an idle P0 hold nor a fixed core lock on this board. Resetting
+  application clocks restored the original default 900/1032 MHz pair.
+
+The force signature and release sentinel are independently implemented in
+[nvapioc](https://github.com/Demion/nvapioc/blob/master/Source/main.cpp) and
+[NvAPIWrapper](https://github.com/falahati/NvAPIWrapper/pull/73/files).
+No verified force-owner getter or companion call restoring boost was found.
+`SetPstateClientLimits` limits permitted performance; `(3,0)` removes limits,
+which is distinct from holding P0. Dynamic/overclocked-Pstate enable functions
+have conflicting published signatures and were not called speculatively.
+
+Max it remains suppressed on GTX 745 because the verified force path reduces
+the loaded core clock. The V/F editor remains inapplicable. This force API has not
+been measured on the GTX 770; Kepler needs its own installed-card retest.
+Final state: automatic P8, +40 MHz core offset, stock memory offset, manual
+100% fan, and original application-clock defaults. No voltage writes were made.
 
 ## Ordinary clock offsets
 
