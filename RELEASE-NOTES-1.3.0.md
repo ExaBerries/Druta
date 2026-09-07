@@ -60,6 +60,9 @@ with automatic loading skipped after an abnormal shutdown.
   and is included in profiles. Its effect remains generation-dependent:
   Pascal was measured beyond its ordinary memory-offset ceiling; that result
   is not generalized to Turing or Blackwell.
+- Remove the lengthy explanatory text beneath Additional Memory Clock Offset
+  to keep the clock controls compact. Control availability and write guards
+  are unchanged.
 - Legacy fan control restores requested duty and Auto policy. A **0 RPM reading
   does not hide a confirmed fan-control interface**, including on a water-cooled
   TITAN RTX.

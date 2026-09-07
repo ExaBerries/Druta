@@ -1953,8 +1953,6 @@ class Druta:
                                                         or _live.get("mem")
                                                         or 0) * 0.25),
                                                    1000)
-                                    built = 0
-                                    unverified = []
                                     for kn in self.DOMAIN_KNOBS:
                                         if kn.ctrl not in self.gpu.clkdom_domains():
                                             continue
@@ -1979,16 +1977,6 @@ class Druta:
                                         paired = kn.ctrl in controls
                                         if not paired and not kn.xoc_only:
                                             continue
-                                        # Only a PAIRED knob counts as mapped.
-                                        # Otherwise showing the unverified one
-                                        # would suppress the "nothing is mapped
-                                        # for this card" message below, which is
-                                        # the honest thing to say about every
-                                        # other domain.
-                                        if paired:
-                                            built += 1
-                                        else:
-                                            unverified.append(kn)
                                         init = int(cur.get(kn.ctrl, {})
                                                    .get("freq_khz", 0) / 1000)
                                         lbl, col, _p = self.domain_knob_label(kn, drows)
@@ -2050,83 +2038,6 @@ class Druta:
                                             xoc_lo=xlo, xoc_hi=xhi,
                                             extra=("Stock", lambda _k=kn.key:
                                                    self.stock_knob(_k)))
-                                    # SAY IT WHERE THE KNOB IS, and say what
-                                    # was MEASURED on this architecture rather
-                                    # than what was inferred. Those came apart
-                                    # badly here twice: once when an XBAR
-                                    # result on GP102 was generalised to every
-                                    # domain, and once when a Blackwell result
-                                    # taken far inside the declared range was
-                                    # generalised past it.
-                                    #
-                                    # The generations genuinely disagree. Pascal
-                                    # carries the memory clock PAST its declared
-                                    # ceiling; Blackwell clamps at exactly the
-                                    # declared maximum. A single sentence cannot
-                                    # be true for both, so the note is built
-                                    # from the measurement table.
-                                    arch = self.gpu.arch_name() or "this card"
-                                    for kn in unverified:
-                                        dom = kn.ctrl
-                                        applies = not self.gpu.clkdom_delta_inert(dom)
-                                        clears = self.gpu.clkdom_delta_clears_ceiling(dom)
-                                        if applies and clears:
-                                            txt, col = (
-                                                f"{arch}: MEASURED to go PAST the "
-                                                f"declared memory ceiling - with the "
-                                                f"ordinary memory slider already at "
-                                                f"its maximum, this carried the clock "
-                                                f"beyond it. This is the only path "
-                                                f"found that does.", GOOD)
-                                        elif applies and clears is False:
-                                            txt, col = (
-                                                f"{arch}: this applies, but it is "
-                                                f"CLAMPED at exactly the declared "
-                                                f"maximum - past that the value "
-                                                f"stores in full and the clock does "
-                                                f"not move. It is a second route to "
-                                                f"the same envelope, not past it.",
-                                                WARN)
-                                        elif applies:
-                                            txt, col = (
-                                                f"{arch}: this applies, but whether "
-                                                f"it passes the declared ceiling is "
-                                                f"UNTESTED here. Watch the Monitor's "
-                                                f"measured memory clock, never the "
-                                                f"value read back.", WARN)
-                                        else:
-                                            txt, col = (
-                                                f"{arch}: on this generation the "
-                                                f"per-domain delta is stored and "
-                                                f"ignored - measured for XBAR on "
-                                                f"GP102. MEM here is unproven; judge "
-                                                f"it only by the measured clock.",
-                                                WARN)
-                                        with dpg.table_row():
-                                            dpg.add_text(
-                                                txt, color=col,
-                                                wrap=self.s(sum(self.KNOB_COLS[:2])))
-                                    if not built:
-                                        # Say why the knobs are missing. A silently short
-                                        # list looks like the feature was never built;
-                                        # this card simply has not been mapped, which is a
-                                        # different and fixable thing.
-                                        with dpg.table_row():
-                                            dpg.add_text(
-                                                ("Per-domain clock offsets: none is "
-                                                 "MAPPED for this card"
-                                                 + (", so the memory knob above is the "
-                                                    "only one offered and it is offered "
-                                                    "unproven" if unverified else "")
-                                                 + ". A knob is normally shown only where "
-                                                 "moving it was measured to move the "
-                                                 "card's MEASURED clock - on GP102 the "
-                                                 "driver records the request and the "
-                                                 "hardware ignores it, which shows up as "
-                                                 "the Monitor's delta going red in "
-                                                 "proportion to the offset."),
-                                                color=DIM,
-                                                wrap=self.s(sum(self.KNOB_COLS[:2])))
 
                         # Voltage boost is grouped with the limits, not the offsets: it moves
                         # no clock at all, it raises a ceiling the arbiter is allowed to
