@@ -1803,6 +1803,34 @@ class Druta:
                             "The log says so each time.\n\n"
                             "This raises voltage, power and clocks together. It is\n"
                             "an overclock, and it can destabilise the driver.")
+                elif self.legacy_p0_supported():
+                    dpg.add_button(label="Lock P0 and max fan", tag="go_p0fan",
+                                   callback=self.lock_p0_and_max_fan,
+                                   width=self.s(250), height=self.s(28))
+                    with dpg.theme() as p0_th:
+                        with dpg.theme_component(dpg.mvAll):
+                            dpg.add_theme_color(dpg.mvThemeCol_Button, (230, 200, 35))
+                            dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (250, 222, 60))
+                            dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (205, 174, 20))
+                            dpg.add_theme_color(dpg.mvThemeCol_Text, (24, 16, 6))
+                    dpg.bind_item_theme("go_p0fan", p0_th)
+                    self._ctl_widgets.append("go_p0fan")
+                    with dpg.tooltip("go_p0fan"):
+                        dpg.add_text(
+                            "Holds P0, verifies the hold, then sets fan duty to 100%.\n"
+                            "Clock offsets, power and voltage settings stay as set.\n\n"
+                            "Measured on GTX 745 / 472.12: the hold ran the core at\n"
+                            "540 MHz even under load, versus 1072 MHz with normal\n"
+                            "boost. This is a performance-state hold, not maximum\n"
+                            "boost. It keeps memory in its top band for timing work.\n\n"
+                            "Undo last write restores the fan but leaves P0 held.\n"
+                            "Release P0, Clocks > Release, Reset all, or exit drops\n"
+                            "the hold. Fan duty stays manual until Auto or Reset all.\n"
+                            "If setting the fan fails, a newly acquired hold is released.")
+                    dpg.add_button(label="Release P0", tag="go_p0release",
+                                   callback=self.release_p0,
+                                   width=self.s(110), height=self.s(28))
+                    self._ctl_widgets.append("go_p0release")
             dpg.add_text("writes ENABLED - untick for read-only. "
                          "All changes are reversible and reset on reboot",
                          tag="unlock_note", color=DIM)
@@ -2430,6 +2458,8 @@ class Druta:
             if dpg.does_item_exist(tag):
                 available = (fan_manual if tag in ("sl_fan", "in_fan", "go_fan")
                              else fan_auto if tag == "go_fan_x"
+                             else fan_manual and self.legacy_p0_supported()
+                             if tag == "go_p0fan"
                              else frequency_lock if tag in (
                                  "lock_min", "lock_max", "go_lock", "go_lockmax")
                              else True)
@@ -2838,6 +2868,61 @@ class Druta:
             self.log("max: curve not readable on this card - the other three "
                      "still applied", False)
 
+    def legacy_p0_supported(self):
+        """Only a backend-confirmed board/driver pair may expose P0 writes."""
+        return bool(getattr(self.gpu, "legacy_p0_supported", lambda: False)())
+
+    def sync_legacy_p0_lock(self, verified=None):
+        """Keep even a failed request visible when its cleanup did not release."""
+        if self.gpu.legacy_p0_owned():
+            prior = self._clk_lock or {}
+            if verified is None:
+                verified = prior.get("verified", False)
+            self.set_lock_state({"kind": self.LOCK_P0, "verified": bool(verified)})
+        elif (self._clk_lock or {}).get("kind") == self.LOCK_P0:
+            self.set_lock_state(None)
+
+    def release_p0(self, sender=None, app_data=None, user_data=None):
+        if not self.guard():
+            return
+        self.report(self.gpu.release_legacy_p0())
+        self.sync_legacy_p0_lock()
+
+    def lock_p0_and_max_fan(self, sender=None, app_data=None, user_data=None):
+        """Hold the verified legacy P0 state and set only fan duty to 100%."""
+        if not self.legacy_p0_supported() or not self.guard():
+            return
+        if not self.gpu.fan_capabilities()["manual"]:
+            self.log("P0 + fan: manual fan control is unavailable; nothing changed", False)
+            return
+        already_owned = self.gpu.legacy_p0_owned()
+        # Capture the original fan before either write. Profiles intentionally
+        # exclude lock ownership; Release is still needed after Undo.
+        if not self.autosave_before("lock P0 and max fan"):
+            self.log("P0 + fan: could not capture a complete undo point; nothing changed", False)
+            return
+        if not self.handover(self.LOCK_P0):
+            return
+        ok, msg = self.gpu.hold_legacy_p0()
+        self.report((ok, msg))
+        self.sync_legacy_p0_lock(verified=ok)
+        if not ok or not self.gpu.legacy_p0_owned():
+            self.log("P0 + fan: hold failed; fan duty was left unchanged", False)
+            return
+        try:
+            fan_ok, msg = self.gpu.set_fan(100)
+        except Exception as exc:
+            fan_ok, msg = False, str(exc)
+        self.log("P0 + fan: fan 100% - " + msg, fan_ok)
+        if fan_ok:
+            if dpg.does_item_exist("sl_fan"):
+                dpg.set_value("sl_fan", 100)
+                self.sync_knob_boxes()
+        elif not already_owned:
+            released, msg = self.gpu.release_legacy_p0()
+            self.log("P0 + fan: releasing the newly acquired hold - " + msg, released)
+            self.sync_legacy_p0_lock()
+
     def hold_cap_point(self, cap):
         """Final step: pin the card on the cap point, the way Ctrl+H does.
 
@@ -2875,8 +2960,10 @@ class Druta:
     # to become the right call and a wrong one succeeds silently.
     LOCK_NVML = "nvml"
     LOCK_VF = "vf"
+    LOCK_P0 = "p0"
     LOCK_NAME = {LOCK_NVML: "NVML locked clocks (Clocks menu)",
-                 LOCK_VF: "V/F point lock (Ctrl+H)"}
+                 LOCK_VF: "V/F point lock (Ctrl+H)",
+                 LOCK_P0: "legacy P0 hold"}
 
     def release_current(self):
         """Drive the release that matches the record, and return its (ok, msg).
@@ -2888,6 +2975,11 @@ class Druta:
         lock away because a button was nearby is not this app's business."""
         if self._clk_lock and self._clk_lock.get("kind") == self.LOCK_VF:
             return self.gpu.clear_vf_lock()
+        if ((self._clk_lock or {}).get("kind") == self.LOCK_P0
+                or getattr(self.gpu, "legacy_p0_owned", lambda: False)()):
+            result = self.gpu.release_legacy_p0()
+            self.sync_legacy_p0_lock()
+            return result
         return self.gpu.reset_gpu_clocks()
 
     def handover(self, kind):
@@ -3024,6 +3116,11 @@ class Druta:
                       f"point {held['got_idx']} @ {held['got_mv']:.2f} mV, "
                       f"{held['got_mhz']:.0f} MHz")
                    + "   •   Ctrl+H releases")
+        elif state and state["kind"] == self.LOCK_P0:
+            txt = (("HOLD  legacy P0 hold" if state.get("verified") else
+                    "HOLD  legacy P0 request remains after failed verification / release")
+                   + "  •  GTX 745 / 472.12 measured core 540 MHz under load "
+                     "(normal boost 1072 MHz)  •  Release P0 drops the hold")
         elif state:
             txt = (f"clock locked to [{state['lo']}..{state['hi']}] MHz from the "
                    f"Clocks menu (NVML locked clocks) - no V/F point is held")
@@ -3068,12 +3165,16 @@ class Druta:
                 released[self.LOCK_NVML] = ok
             elif name == GPU.VF_LOCK_STEP:
                 released[self.LOCK_VF] = ok
+            elif name == GPU.P0_LOCK_STEP:
+                released[self.LOCK_P0] = ok
         # A failed release that still dropped the banner would leave the driver
         # holding a card nothing on screen names, which is the exact
         # disagreement release_lock refuses to create (see its docstring). The
         # V/F step is only emitted when one was actually held, so a missing
         # entry for the recorded kind means nothing needed releasing.
         kind = (self._clk_lock or {}).get("kind")
+        if kind == self.LOCK_P0:
+            released[self.LOCK_P0] = not self.gpu.legacy_p0_owned()
         if kind is None or released.get(kind, True):
             self.set_lock_state(None)
         else:

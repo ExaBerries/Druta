@@ -52,6 +52,16 @@ This mode is actually the opposite of deflatten. It flattens everything after 80
 
 Had enough with boring sliders to the maximum? Click "max it". It does the V/F deflatten, maxes out the voltage boost, power limit, fan, and holds at 1093mv all in one click. You click it once, and the rest is the actual part of overclocking: changing the frequency. 
 
+On the verified GTX 745 with driver 472.12, this position instead has a yellow
+**Lock P0 and max fan** button. It holds P0 and sets manual fan duty to 100%.
+The core can run around 540 MHz even under load, so this is for keeping the
+memory performance state steady rather than maximizing the core clock.
+**Release P0** drops the hold; **Auto** restores automatic fan control.
+**Undo last write** restores the saved fan policy while retaining the P0 hold.
+**Reset all to stock** releases the hold and restores Auto; closing Druta
+releases the hold but leaves fan duty as set. Clock, power and voltage settings
+are not changed by this button.
+
 ## 4. What about XBAR? 
 
 On 10, I have found no manipulable software knobs to tune XBAR. To help you cope and seethe, you can read the the 1000 series XBAR frequence inside the monitor tab of Druta but not change it, because NVIDIA simply doesn't expose any way to change it. The good news:

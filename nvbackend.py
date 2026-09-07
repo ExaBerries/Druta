@@ -161,6 +161,7 @@ class NvAPI:
         self.PerfDecrease = self._i(0x7F7F4600, PTR, ctypes.POINTER(u32))
         self.DynPstates = self._i(0x60DED2ED, PTR, PTR)
         self.CurrentPstate = self._i(0x927DA4F6, PTR, ctypes.POINTER(u32))
+        self.ForcePstate = self._i(0x025BFB10, PTR, u32, u32)
         self.Pstates20Get = self._i(0x6FF81213, PTR, PTR)
         self.Pstates20Set = self._i(0x0F4DAE6B, PTR, PTR)
         self.AllClocks = self._i(0xDCB616C3, PTR, PTR)
@@ -1525,9 +1526,11 @@ class GPU:
     # has to know which one the reset actually released.
     LOCK_STEP = "clock lock"
     VF_LOCK_STEP = "v/f point lock"
+    P0_LOCK_STEP = "legacy P0 hold"
 
     def __init__(self, slot=None):
         self._lock = threading.RLock()
+        self._legacy_p0_owned = False
         # The card this object speaks for, fixed at construction. Nothing
         # re-targets a live GPU: switching cards builds a NEW GPU, which is what
         # keeps the probed per-instance caches (_vfp_layout_cache at 128 entries
@@ -2501,44 +2504,14 @@ class GPU:
     }
 
     def clkdom_delta_inert(self, domain=None):
-        """Is a per-domain frequency delta STORED AND IGNORED on this card?
+        """True only for a measured inert delta; False for a measured response.
 
-        True where the route is known not to work, False where it is known to
-        work, None where we do not know - and the three are different answers,
-        so callers must not collapse None into either.
-
-        The per-domain frequency delta is consumed by PMU microcode, not by
-        anything on the host, and only from clk 3.5 onward. That was settled
-        the expensive way in this project: on GP102 the delta is stored exactly
-        as it is on TU102 - so a read-back proves nothing at all here - and the
-        card never acts on it. Storage is not the discriminator; the generation
-        is. Anything older than Turing gets the warning, because a knob that
-        silently does nothing is worse than one that says it cannot.
-
-        SCOPE, and it is narrower than the sentence above wants to be. What
-        was measured on GP102 was the XBAR domain. MEM was never tried there,
-        and there is a live reason to doubt the generalisation: the declared
-        OC range is read-only - it lives in an INFO payload (NvAPI 0x57B5A5DF
-        version 0x000486AC, entry 0xAC + domain*0x430, s16 min at +0x40 and max
-        at +0x42) and no entry point accepts that geometry for writing - so the
-        unchecked CONTROL delta was believed to be a route PAST that range.
-        It is not. Measured on Blackwell with NVML at zero, the delta tracks
-        the memory clock 1:1 to exactly +3000 MHz effective and then stops;
-        +3500 and +4500 store in full and move nothing. So no path this project
-        has found exceeds the declared range on this generation.
-
-        That leaves the Pascal question genuinely open rather than answered.
-        This returns per-CARD, not per-domain, so on an older card the MEM knob
-        is reporting what was measured elsewhere - on XBAR, on GP102. Treat a
-        Pascal MEM result as unknown until somebody moves that clock and
-        watches it happen.
+        Unknown domains/architectures return None. Pascal XBAR was stored but
+        ignored, while Pascal MEM responded; neither result establishes the
+        behavior of Kepler or Maxwell's unvalidated private control layouts.
         """
-        a = self.arch()
-        if a is None:
-            return None
-        if domain is not None and (a, domain) in self.CLKDOM_DELTA_APPLIES:
-            return not self.CLKDOM_DELTA_APPLIES[(a, domain)]
-        return a < self.ARCH_TURING
+        applies = self.CLKDOM_DELTA_APPLIES.get((self.arch(), domain))
+        return None if applies is None else not applies
 
     def clkdom_delta_clears_ceiling(self, domain):
         """Does this delta reach past the card's DECLARED range? Tri-state."""
@@ -3386,6 +3359,72 @@ class GPU:
 
     def reset_gpu_clocks(self):
         return self._reset_gpu_clocks()
+
+    def legacy_p0_supported(self):
+        """Only the board/driver with measured force AND release behavior.
+
+        This holds the performance state, not a maximum graphics frequency.
+        The tested GM107 stays at 540 MHz under the checked CUDA workload.
+        Kepler and other Maxwell boards still need their own verification.
+        """
+        api = getattr(self, "nvapi", None)
+        card = getattr(api, "selected", None) or {}
+        static = getattr(self, "static", {})
+        return bool(api and api.ok and getattr(api, "ForcePstate", None)
+                    and not getattr(self, "pairing_error", None)
+                    and self.is_gtx745()
+                    and card.get("subsys") == 0x6893103C
+                    and static.get("driver") == "472.12"
+                    and str(static.get("vbios") or "").lower() == "82.07.32.00.6a")
+
+    def legacy_p0_owned(self):
+        """Session ownership, not a claim to read another tuner's force state."""
+        return getattr(self, "_legacy_p0_owned", False)
+
+    def hold_legacy_p0(self):
+        if not self.legacy_p0_supported():
+            return False, "legacy P0 hold is not verified on this GPU/driver"
+        try:
+            status = self.nvapi.ForcePstate(self.nvapi.gpu, u32(0), u32(2))
+        except Exception as exc:
+            return False, f"P0 request failed: {exc}"
+        if status != 0:
+            return False, f"P0 request failed (NVAPI status {status})"
+        # Track a successful request immediately, even if verification fails.
+        # A failed rollback must remain releasable from the UI and on exit.
+        self._legacy_p0_owned = True
+        reason = "P0 and its top memory band were not observed"
+        consecutive = 0
+        try:
+            for _ in range(20):
+                data = self.read()
+                top = data.get("mem_p0max")
+                mem = data.get("mem")
+                good = (data.get("pstate") == 0 and top is not None and top > 0
+                        and mem is not None and mem >= top * 0.97)
+                consecutive = consecutive + 1 if good else 0
+                if consecutive >= 3:
+                    return True, (f"P0 held; core {data.get('core', '?')} MHz, "
+                                  f"memory {mem} MHz (not a maximum-core lock)")
+                time.sleep(0.1)
+        except Exception as exc:
+            reason = f"P0 verification failed: {exc}"
+        ok, message = self.release_legacy_p0()
+        return False, reason + "; " + (message if ok else "RELEASE FAILED: " + message)
+
+    def release_legacy_p0(self):
+        if not self.legacy_p0_owned():
+            return True, "this session owns no legacy P0 hold"
+        try:
+            status = self.nvapi.ForcePstate(self.nvapi.gpu, u32(16), u32(2))
+        except Exception as exc:
+            return False, f"P0 release failed: {exc}"
+        if status != 0:
+            return False, f"P0 release failed (NVAPI status {status})"
+        # Automatic behavior may still be P0 under load. Waiting for P8 would
+        # incorrectly report a failed release while a game is running.
+        self._legacy_p0_owned = False
+        return True, "P0 request released; automatic performance states restored"
 
     def _reset_gpu_clocks(self, allow_pascal_noop=False):
         nv = self.nvml
@@ -5700,6 +5739,8 @@ class GPU:
                 (False, "power limit: default unknown, left unchanged")))
         steps.append(ResetStep(self.LOCK_STEP,
                                self._reset_gpu_clocks(allow_pascal_noop=True)))
+        if self.legacy_p0_owned():
+            steps.append(ResetStep(self.P0_LOCK_STEP, self.release_legacy_p0()))
         # The V/F point lock is a DIFFERENT mechanism: reset_gpu_clocks does not
         # touch it, so a reset that stopped at the step above would report a
         # clean card while this one still pinned it. Appended only when one is
@@ -5826,6 +5867,7 @@ for _m in ("read", "read_clock_domains", "read_vf_curve", "apply_vf_deltas",
            "reset_vf_curve",
            "rephase_deltas", "set_clock_offset", "set_power_limit_mw",
            "lock_gpu_clocks", "reset_gpu_clocks", "set_fan", "reset_fan",
+           "hold_legacy_p0", "release_legacy_p0",
            "read_fan_control_state", "restore_fan_control_state",
            "read_fan_manual", "fan_capabilities",
            "read_vf_lock", "read_clk_lock", "set_vf_lock", "clear_vf_lock",

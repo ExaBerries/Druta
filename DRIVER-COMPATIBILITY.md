@@ -17,7 +17,7 @@ column describes the TITAN boards; GTX 770 and GTX 745 were tested only on 472.1
 | V/F point lock | Confirmed | Confirmed during loaded offset checks; exact lock restored | Confirmed during loaded offset checks; exact lock restored | Unavailable through the current V/F path | No supported V/F table at idle or P0; suppressed |
 | Fan duty, RPM, manual control and Auto | Confirmed | Both fan controls' requested levels and Auto policies verified through NVAPI; zero RPM is expected on this water-cooled card | Manual duty/RPM response and Auto verified through NVAPI cooler controls | Manual 50%, RPM response and exact Auto-policy restoration confirmed | Manual 90% request reads back; original manual 100% restored; RPM unavailable |
 | Clock event/performance-limit reasons | Confirmed | Legacy NVML ThrottleReasons fallback implemented | Legacy NVML ThrottleReasons fallback implemented | NVAPI performance-decrease reasons readable | NVML/NVAPI limit reasons readable |
-| V/F curve editing and de-flatten planners | Confirmed | Negative-point write/reset and raised-cap de-flatten confirmed | Negative-point write/reset and raised-cap de-flatten confirmed; the regular ramp no longer treats the stock clock-list maximum as an overclock ceiling | Not applicable: editor, planners, point locks and shortcuts suppressed; switching back restores RTX’s 128 points | Editor, planners and Max it suppressed on this GTX 745; RTX returns with 128 points |
+| V/F curve editing and de-flatten planners | Confirmed | Negative-point write/reset and raised-cap de-flatten confirmed | Negative-point write/reset and raised-cap de-flatten confirmed; the regular ramp no longer treats the stock clock-list maximum as an overclock ceiling | Not applicable: editor, planners, point locks and shortcuts suppressed; switching back restores RTX’s 128 points | V/F editor/planners suppressed; yellow Lock P0 and max fan replaces Max it on the verified board; RTX returns with 128 points |
 | NVVDD rail offsets and all four limits | Confirmed; see voltage measurements below | Confirmed, including each live ceiling clamp and idle floor | Confirmed, including each live ceiling clamp; floor uses verified legacy re-send | Private layout unvalidated; controls blocked | Unvalidated private layout; writes blocked |
 | Per-domain clock offsets | Confirmed for mapped controls | XBAR, Additional Memory Clock Offset, SYS, VIDEO and LTC each moved by about +30 MHz under load | Additional Memory Clock Offset +25 MHz moved reported memory by +20.25 MHz twice; other paired controls remain hidden | Unvalidated; private controls hidden, including Additional Memory Clock Offset | No confirmed pairing; hidden |
 | Power limit and voltage boost | Confirmed | Confirmed with independent readback | Confirmed with independent readback | NVML power-limit range and voltage-boost getter unavailable; sliders hidden | Power-limit range and voltage-boost getter unavailable; sliders hidden |
@@ -74,11 +74,28 @@ No verified force-owner getter or companion call restoring boost was found.
 which is distinct from holding P0. Dynamic/overclocked-Pstate enable functions
 have conflicting published signatures and were not called speculatively.
 
-Max it remains suppressed on GTX 745 because the verified force path reduces
-the loaded core clock. The V/F editor remains inapplicable. This force API has not
+The full Max it action remains suppressed because the force path reduces the
+loaded core clock. A separate yellow **Lock P0 and max fan** action now occupies
+its place on the verified GTX 745 PCI 1382 / subsystem 6893103c, VBIOS
+82.07.32.00.6a, driver 472.12. It verifies P0 and the top memory band before
+setting fan duty to 100%; it does not change clock offsets, power or voltage.
+The tooltip discloses the measured reduced core clock. A separate Release P0
+button restores automatic states, leaving fan duty as set. Undo restores the
+saved fan policy but intentionally retains P0 ownership. Reset all and exit
+release this session's hold; a failed release remains recorded. Profiles do not
+persist the hold. [Live UI checks](experiments/maxwell-gtx745-p0-fan-ui-47212.json)
+verified P0 at 539/900 MHz from stock, fan 100%, Undo to Auto, repeated Release,
+Reset all, exit and switching back to RTX. Original stock offsets and Auto fan
+policy were restored. The V/F editor remains inapplicable. This force API has not
 been measured on the GTX 770; Kepler needs its own installed-card retest.
 Final state: automatic P8, +40 MHz core offset, stock memory offset, manual
 100% fan, and original application-clock defaults. No voltage writes were made.
+
+XBAR, SYS, VIDEO, LTC and additional memory-clock writes on GTX 770/745 have
+not been verified. Read-only discovery did not establish a usable private
+control mapping. They remain hidden as unvalidated, rather than classified as
+proven inert. The backend now returns unknown for unmeasured domain/architecture
+combinations; the explicit measured Pascal/Turing/Blackwell results remain.
 
 ## Ordinary clock offsets
 

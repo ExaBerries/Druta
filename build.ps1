@@ -68,6 +68,7 @@ function Get-SourceSnapshot {
         'experiments/kepler-validation-47212.json',
         'experiments/maxwell-gtx745-validation-47212.json',
         'experiments/maxwell-gtx745-p0-paths-47212.json',
+        'experiments/maxwell-gtx745-p0-fan-ui-47212.json',
         'experiments/maxwell-gtx745-timing-sweep-47212.json',
         'experiments/maxwell-gtx745-timing-sweep-47212.md',
         'experiments/kepler-timing-writes-47212.json',
