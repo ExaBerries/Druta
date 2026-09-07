@@ -640,8 +640,8 @@ class Druta:
     # header / width in UNSCALED px. The unit lives in the CELL, not the
     # header, because the column is not homogeneous: domain 31 is a PCIe link
     # generation and prints "gen 3" where every other row prints MHz.
-    DOM_COLS = (("dom", 46), ("domain", 165), ("programmed  A", 145),
-                ("measured  B", 145), ("Δ  B-A", 135),
+    DOM_COLS = (("dom", 46), ("domain", 165), ("reported  A", 145),
+                ("reported  B", 145), ("Δ  B-A", 135),
                 ("flags", 90), ("srcid", 80))
 
     # A name we earned is written plainly; a name that is only elimination gets
@@ -661,72 +661,43 @@ class Druta:
     DOM_BAND_COL = {"ok": DIM, "warn": WARN, "bad": BAD}
 
     def build_domains(self):
-        """Every domain the private getter populates, PROGRAMMED beside
-        MEASURED. The tiles show array A - the target the driver programmed,
-        always exactly on the 15 MHz grid - and this panel is the only thing in
-        the app that says what the card is measured to be doing instead. A
-        monitor that only ever quotes the optimistic number of the two is the
-        failure mode it exists to close.
+        """Show both private clock arrays without assuming every GPU has counters.
 
-        Measured (see nvbackend's header for the full table): settled and under
-        load the two agree to within ~3 MHz, or by an exact 15 MHz bin with B
-        the HIGHER of the two. The wide readings are a clock change in flight
-        (~1-2 s, either sign, hundreds of MHz) or an idle card, where B
-        measures a gated clock and sits hundreds of MHz low indefinitely.
-
-        All 32 rows are built once and the unpopulated ones hidden rather than
-        created per tick: a domain that only appears at some other pstate then
-        shows up IN PLACE instead of renumbering the table under the reader."""
+        A/B roles were measured on TU102. GK104 returns identical values in
+        both arrays, so its B values do not establish physical clock delivery.
+        Rows retain their domain numbers across performance states and cards.
+        """
         with dpg.child_window(tag="pan_dom", width=-1, height=self.s(300)):
             dpg.add_text("ALL CLOCK DOMAINS  ·  private NvAPI "
                          "GetAllClocks (0x1BD69F49)", color=ACCENT,
                          tag="dom_title")
             with dpg.tooltip("dom_title"):
                 dpg.add_text(
-                    "The 288-dword payload is two arrays over the same 32\n"
-                    "domains, an exact partition verified over a 192-sample\n"
-                    "sweep:  A = 2 dwords per domain at 2*d {freq, flags},\n"
-                    "B = 7 dwords per domain at 64+7*d {freq, srcid, 0...}.\n\n"
-                    "MEM is the RAW NVAPI figure (half the data rate) - the\n"
-                    "MEM CLOCK tile converts it to the true memory clock, so\n"
-                    "the two are meant to differ by the GDDR divisor.\n\n"
-                    "Measured on this card, GPC, 40 samples per case:\n"
-                    "  settled + ~99% load, free boost   A 1950.0 / B 1949.9\n"
-                    "  settled + load, locked 1920       within 3 MHz\n"
-                    "  settled + load, locked 1350       B 1364.9: one 15 MHz\n"
-                    "                                    bin ABOVE A, steady\n"
-                    "  ~1-2 s after any clock change     hundreds of MHz,\n"
-                    "                                    either sign\n"
-                    "  idle, no load                     B sits hundreds low\n"
-                    "                                    and never settles -\n"
-                    "                                    the clock is gated\n"
-                    "                                    and B is its average\n"
-                    "So a wide delta means 'mid-change or idle'. A wide one on\n"
-                    "a busy card that has been at one clock for seconds is the\n"
-                    "case worth reading: there the tiles are optimistic.\n\n"
-                    "Domain 31 is not a clock: array A holds the PCIe link\n"
-                    "generation. Its array-B word has not been identified,\n"
-                    "so it is shown raw rather than dressed up as anything.")
+                    "Two arrays cover 32 private clock domains:\n"
+                    "A: 2*d {frequency, flags}; B: 64+7*d {frequency, srcid, ...}.\n"
+                    "On TU102, A tracks the programmed target and B behaves as\n"
+                    "a measured counter. On GK104, A and B matched exactly in\n"
+                    "idle, boost and held-P0 samples; B is not independent proof\n"
+                    "of the physical clock. Other GPUs need their own validation.\n\n"
+                    "GPC2CLK and other 2CLK labels retain the doubled units\n"
+                    "returned by the driver. MEM retains the raw driver units;\n"
+                    "the memory tile converts these for the memory technology.\n\n"
+                    "Kepler names with '?' follow GTX 690 ROM/state correlation.\n"
+                    "Domains 16/17 form the XBAR/SYS pair; their individual order\n"
+                    "is unresolved because both clocks have identical values.\n"
+                    "Domain 31, where populated, is shown as link generation\n"
+                    "with its unidentified B field displayed raw.")
             dpg.add_separator()
             # The legend is on the page, not in the tooltip: a hedged name is
             # only honest if the thing that hedges it is visible without
             # hovering.
             dpg.add_text(
-                "A = the target the driver PROGRAMMED (always on the 15 MHz "
-                "grid; this is what the tiles above show)   ·   B = a "
-                "free-running MEASURED counter   ·   Δ turns amber "
-                "past one 15 MHz bin and red past three. Measured: settled and "
-                "under load the two agree to within ~3 MHz. Δ is wide for "
-                "~1-2 s after any clock change (either sign), and wide "
-                "PERMANENTLY on an idle card - with no work the clock gates "
-                "and B measures its average, hundreds of MHz low. A steady Δ "
-                "on a busy card is the one that counts: there the tiles are "
-                "optimistic.\n"
-                "Names:  plain = CONFIRMED   ·   amber '?' = LIKELY, by "
-                "elimination only - domain 31 is one of these, drawn as 'PCIe "
-                "link gen?' because it is a link generation and not a clock at "
-                "all   ·   '--' = populated but unidentified, so it stays a "
-                "number (3/6/20/22, static here).",
+                "A / B = driver-reported clock arrays. TU102: target / measured "
+                "counter; GK104: identical in tested states. 2CLK = doubled "
+                "clock units. Delta colors use one / three graphics bins, "
+                "scaled only for identified 2CLK domains.\n"
+                "Names: plain = confirmed; '?' = inferred; '--' = unidentified. "
+                "Kepler XBAR/SYS2CLK? identifies the pair, not its individual order.",
                 tag="dom_legend", color=DIM, wrap=self.s(1100))
             dpg.add_text("", tag="dom_err", color=BAD, show=False)
             with dpg.table(tag="dom_table", header_row=True,
@@ -789,16 +760,6 @@ class Druta:
             dpg.configure_item("dom_err", show=bool(err))
             if err:
                 dpg.set_value("dom_err", err)
-        # Which rows publish at the GPC row's scale. Found by MAGNITUDE against
-        # that row, not by a list of domain numbers - a domain-number list is
-        # the one thing guaranteed not to survive an architecture change, and
-        # this panel has been bitten by exactly that. Anything within half to
-        # one-and-a-half times the GPC clock is on the core rail and shares its
-        # multiplier; memory sits far outside that window and keeps its own.
-        gpc_row = next((x for x in (rows or [])
-                        if x.get("name") in ("GPC", "GPC2CLK")), None)
-        gpc_scale = (gpc_row or {}).get("scale") or 1
-        gpc_mhz = (gpc_row or {}).get("prog_mhz") or 0
         present = set()
         for r in (rows or []):
             dom = r["domain"]
@@ -847,11 +808,7 @@ class Druta:
                 dpg.configure_item(f"dom_{dom}_name",
                                    color=self.GRADE_COL.get(grade, DIM))
             # re-theme only on a band change, same reason as the bars
-            scale = 1
-            if gpc_scale > 1 and gpc_mhz and r.get("prog_mhz"):
-                if 0.5 * gpc_mhz <= r["prog_mhz"] <= 1.5 * gpc_mhz:
-                    scale = gpc_scale
-            band = self.dom_band(r["delta_mhz"], scale)
+            band = self.dom_band(r["delta_mhz"], r.get("scale", 1))
             if self._dom_band.get(dom) != band:
                 self._dom_band[dom] = band
                 dpg.configure_item(f"dom_{dom}_delta",

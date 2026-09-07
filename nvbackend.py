@@ -388,12 +388,13 @@ class _ClkFreqs(ctypes.Structure):
 # arrays over the same 32 domains, an exact partition -
 #     A: dwords 0..63,   2 per domain at 2*d,      {freq_kHz, capability flags}
 #     B: dwords 64..287, 7 per domain at 64+7*d,   {freq_kHz, srcid, 0,0,0,0,0}
-# They are NOT two views of one number. A is the PROGRAMMED target: always
+# On TU102 these are distinct observations. A is the PROGRAMMED target: always
 # exactly on the 15 MHz grid, and bit-identical across samples for a fixed
 # domain. B is a MEASURED counter: it jitters 1-3 Hz and never lands on the
-# grid. Anything quoting one of them has to say WHICH.
+# grid. GK104 returns identical A/B values in tested states; it has not
+# established an independent measured counter. Keep that scope explicit.
 #
-# HOW FAR APART THEY ACTUALLY RUN, measured on this card under ~99% GPU load,
+# HOW FAR APART THEY ACTUALLY RUN, measured on TU102 under ~99% GPU load,
 # sampled >=8 s after the clock last changed (40 samples per locked case,
 # 20 free-boosting), GPC:
 #     free-boosting at 1950   A 1950.0   B 1949.90          -0.10 MHz
@@ -504,53 +505,53 @@ PRIV_DOMAIN_ID = {
 
 
 def classify_domain_names(rows, core_mhz=None, mem_nvml=None,
-                          blackwell=False):
-    """Name clock domains by CORRELATION against the driver's own figures.
+                          blackwell=False, architecture=None):
+    """Name telemetry using architecture-specific identities, then correlation.
 
-    `rows` is mutated in place and returned.
-
-    The only two names anybody can be sure of without a per-architecture map
-    are the two the driver will tell us independently: whichever domain carries
-    the GPU clock, and whichever carries the memory clock. Everything else is
-    either a TU102 name that has to prove the card looks like TU102 first, or
-    an index.
-
-    Three rules:
-
-    1. A domain matching the core clock at 1x is GPC; at 2x it is GPC2CLK, and
-       it is named for what it actually holds rather than being silently halved
-       - the core tile already shows the graphics clock.
-    2. A domain reading zero while the card is demonstrably running is marked
-       PRIV_UNPOPULATED and loses its name. An empty slot is not a slow clock.
-    3. The TU102 table is applied only when this card presents the TU102
-       signature - GPC correlating to domain 0. On anything else the extra
-       names are not ours to hand out.
-
-    If the correlation fails outright (no core figure to check against), the
-    table is still applied so a working panel is never blanked by a failed
-    probe, but every CONFIRMED drops to LIKELY: without ground truth the names
-    are inherited assumptions, and should read as such."""
+    Equal frequencies do not identify a domain: Kepler's idle MEM and graphics
+    clocks both read 324 MHz. Known families use their established primary
+    slots; unknown families require a unique independent clock correlation.
+    Extra Kepler names are GK104 ROM/live-state inferences and remain LIKELY.
+    These telemetry IDs never authorize private offset-control writes.
+    """
     def close(a, b, tol=0.005):
         return bool(b) and abs(a - b) <= max(0.5, abs(b) * tol)
 
+    populated = {r["domain"]: r for r in rows
+                 if r.get("kind") == PRIV_FREQ and r.get("prog_mhz")}
+    legacy = architecture in (2, 3, 4)
+    modern = architecture == 6 or blackwell or architecture == 10
     gpc_dom, gpc_scale, mem_dom = None, 1, None
-    for r in rows:
-        if r.get("kind") != PRIV_FREQ:
-            continue
-        p = r.get("prog_mhz") or 0.0
-        if not p:
-            continue
-        if gpc_dom is None and core_mhz:
-            if close(p, core_mhz):
-                gpc_dom, gpc_scale = r["domain"], 1
-            elif close(p, 2.0 * core_mhz):
-                gpc_dom, gpc_scale = r["domain"], 2
-        if mem_dom is None and close(p, mem_nvml):
-            mem_dom = r["domain"]
+    if legacy or modern:
+        slot, gpc_scale = (15, 2) if legacy else (0, 1)
+        gpc_dom = slot if slot in populated else None
+        mem_dom = 4 if 4 in populated else None
+    else:
+        candidates = [(dom, scale) for dom, r in populated.items()
+                      for scale in (1, 2)
+                      if core_mhz and close(r["prog_mhz"], scale * core_mhz)]
+        memory = [dom for dom, r in populated.items()
+                  if close(r["prog_mhz"], mem_nvml)]
+        if len(candidates) == 1:
+            gpc_dom, gpc_scale = candidates[0]
+        if len(memory) == 1:
+            mem_dom = memory[0]
+        if gpc_dom is not None and gpc_dom == mem_dom:
+            gpc_dom = mem_dom = None
 
-    # Domain 0 carrying the GPU clock is the TU102 shape. GP102 puts it at 15.
-    turing_like = (gpc_dom == 0)
-    blind = (gpc_dom is None)
+    turing_like = architecture == 6 or (architecture is None and gpc_dom == 0)
+    blind = architecture is None and not core_mhz
+
+    # GTX 690 ROM + both GK104 cores, R472.12, idle/boost/held P0.
+    # See experiments/kepler-gtx690-clock-domains.md. Equal XBAR/SYS clocks
+    # cannot establish their individual order. These are inferred identities,
+    # not independently measured engine counters, so retain question marks.
+    KEPLER_NAMES = {
+        6: ("DISP", 1),
+        16: ("XBAR/SYS2CLK", 2), 17: ("XBAR/SYS2CLK", 2),
+        18: ("HUB", 1), 20: ("PWR", 1), 21: ("MSD", 1),
+        25: ("L2C2CLK", 2),
+    }
 
     # GP102's own earned name, gated on the GP102 signature exactly as the
     # TU102 table is gated on the TU102 one. Domain 16 was identified by a
@@ -563,7 +564,7 @@ def classify_domain_names(rows, core_mhz=None, mem_nvml=None,
     # slaved to GPC at ~0.966". Calling that XBAR is an analogy with TU102,
     # where the domain in the same relationship (~0.95 of GPC) is XBAR. The
     # behaviour is established; the word is not.
-    pascal_like = (gpc_dom == 15)
+    pascal_like = architecture == 4 or (architecture is None and gpc_dom == 15)
     PASCAL_NAMES = {16: ("XBAR2CLK", PRIV_LIKELY)}
 
     # BLACKWELL PUTS GPC AT DOMAIN 0 TOO, so `turing_like` is true there and
@@ -609,7 +610,8 @@ def classify_domain_names(rows, core_mhz=None, mem_nvml=None,
 
     for r in rows:
         dom = r["domain"]
-        if (r.get("kind") == PRIV_FREQ and core_mhz
+        r["scale"] = 1
+        if (r.get("kind") == PRIV_FREQ
                 and not (r.get("prog_khz") or r.get("meas_khz"))):
             r["name"], r["grade"] = "", PRIV_UNPOPULATED
             continue
@@ -619,8 +621,12 @@ def classify_domain_names(rows, core_mhz=None, mem_nvml=None,
             r["scale"] = gpc_scale
         elif dom == mem_dom:
             r["name"], r["grade"] = "MEM", PRIV_CONFIRMED
+        elif architecture == 2 and dom in KEPLER_NAMES:
+            r["name"], r["scale"] = KEPLER_NAMES[dom]
+            r["grade"] = PRIV_LIKELY
         elif pascal_like and dom in PASCAL_NAMES:
             r["name"], r["grade"] = PASCAL_NAMES[dom]
+            r["scale"] = 2
         elif blackwell:
             r["name"], r["grade"] = BLACKWELL_NAMES.get(
                 dom, ("", PRIV_UNNAMED))
@@ -1808,16 +1814,16 @@ class GPU:
                         `name` may be trusted, never how good the reading is
             kind        PRIV_FREQ, or PRIV_PCIE_GEN for domain 31, which is a
                         link generation and not a frequency at all
-            prog_khz    array-A dword: the PROGRAMMED target
-            meas_khz    array-B dword: the MEASURED counter
+            prog_khz    array-A frequency; programmed target on TU102
+            meas_khz    array-B frequency; measured counter on TU102
             prog_mhz / meas_mhz / delta_mhz
                         the same in MHz, None when the row is not a frequency
             flags       array-A's odd dword, the per-domain capability field
                         (constant across every sample of a given domain)
             srcid       array-B's second dword
 
-        delta is measured MINUS programmed, so a card running slower than it
-        was told to reads negative - which is the normal case under load.
+        Delta is B minus A. The physical-counter interpretation was measured
+        on TU102; GK104 returned identical A/B words in all tested states.
 
         `pc` lets a caller that already read a payload this tick hand it over
         instead of paying for a second round trip."""
@@ -1853,7 +1859,8 @@ class GPU:
                     row["delta_mhz"] = (meas - prog) / 1000.0
             rows.append(row)
         classify_domain_names(rows, core_mhz, mem_nvml,
-                              blackwell=self.clkdom_is_blackwell())
+                              blackwell=self.clkdom_is_blackwell(),
+                              architecture=self.arch())
         return rows, None
 
     def _read_clocks(self, d, pc=None):

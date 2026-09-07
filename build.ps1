@@ -72,6 +72,8 @@ function Get-SourceSnapshot {
         'experiments/kepler-gtx690-i2c-47212.md',
         'experiments/mp2888a-discovery-47212.json',
         'experiments/legacy-private-layout-47212.json',
+        'experiments/kepler-gtx690-clock-domains.json',
+        'experiments/kepler-gtx690-clock-domains.md',
         'experiments/maxwell-gtx745-validation-47212.json',
         'experiments/maxwell-gtx745-p0-paths-47212.json',
         'experiments/maxwell-gtx745-p0-fan-ui-47212.json',
@@ -81,7 +83,8 @@ function Get-SourceSnapshot {
         'experiments/kepler-timing-sweep-47212.json',
         'experiments/kepler-ncp4206-identity-47212.json',
         'experiments/kepler-ncp4206-control-47212.json',
-        'tools/i2c_discover.py', 'tools/probe_volt_rails.py'
+        'tools/i2c_discover.py', 'tools/probe_volt_rails.py',
+        'tools/decode_kepler_clocks.py'
     )
     # Only the explicitly public measurement files above are included
     # from experiments/. Other research/session captures remain excluded.

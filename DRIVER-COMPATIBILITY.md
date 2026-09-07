@@ -57,7 +57,12 @@ The subsequent [full timing query and bounded sweep](experiments/maxwell-gtx745-
 ## Legacy private-control decoding status
 
 The earlier phrase "private layout unvalidated" conflated separate interfaces.
-Private **clock telemetry** is already decoded on Kepler/Maxwell. The private
+Private **clock telemetry** arrays are already decoded on Kepler/Maxwell.
+The [GTX 690 ROM and controlled state comparison](experiments/kepler-gtx690-clock-domains.md)
+now also identifies its primary clock domains and infers the BIOS clock roles.
+Domains 16/17 remain an unordered XBAR/SYS pair; extra Kepler names retain `?`.
+The idle core/memory frequency collision no longer mislabels memory as GPC.
+The private
 **offset-control fields** and their physical write effects have not been
 established on GTX 770/745/690. The four-limit getter uses a separate, already
 decoded API; its write path additionally needs measured bases/defaults and a
