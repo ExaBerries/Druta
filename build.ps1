@@ -53,7 +53,7 @@ $sourceDir = Join-Path $bundleDir 'source'
 # of HEAD (which may describe a different executable).
 function Get-SourceSnapshot {
     $paths = @(
-        'app.py', 'druta.py', 'nvbackend.py', 'gpuload.py', 'profiles.py',
+        'app.py', 'druta.py', 'nvbackend.py', 'gpuload.py', 'profiles.py', 'startup.py',
         'railctl.py', 'shuntmod.py', 'timings.py', 'timingwrite.py',
         'Druta.spec', 'build.ps1', 'requirements.txt',
         'COPYING', 'THIRD-PARTY-NOTICES.md', 'README.md', 'MANUAL.md',

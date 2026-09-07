@@ -12,7 +12,25 @@ Druta is from Sanskrit *druta* meaning fast. In Hindu performing art, it can als
 
 # II. A couple useful functions:
 
-## 1. `De-flatten`: 
+## Save a tune and load it at Windows sign-in
+
+**Profiles > Save profile** captures the applied curve, clocks, power, fan policy,
+confirmed per-rail limits and voltage offsets, the Additional Memory Clock
+Offset, and the identified I2C regulator's offset. The Load profile list shows
+these settings. Loading also restores XOC mode and enables the rail controls
+needed by the tune; I2C verification runs under load in each new session.
+
+Choose **Load at startup** beside a named profile to apply a saved copy at
+Windows sign-in. Configure this while running Druta as administrator. Selecting
+it again updates that copy; **Disable startup loading** turns it off. The card,
+VBIOS and driver must still match. After changing drivers, save a fresh profile.
+
+If Windows or Druta did not shut down normally, or the shutdown record cannot
+be verified, automatic loading is skipped for that boot. You can still load a
+profile manually. Reopening Druta does not bypass the skipped boot. After a
+clean shutdown and boot, automatic loading can resume.
+
+## 1. `De-flatten`:
 When two or more points on the VF curve land on the same frequency, only the one with the lowest voltage will ever be used. For example, if 1081, 1087, and 1093mv all correspond to 2000mhz, the card will always run at 1081mv, 2000mhz. Deflatten makes sure that every point on the the V/F curve between 1000mv to 1091mv (adjustable) are *mathematically strictly increasing*. That way, you can run 1091mv immediately without a hard voltage mod. 
 
 The TITAN RTX and TITAN Xp default cap is 1093.75 mV. On the confirmed
