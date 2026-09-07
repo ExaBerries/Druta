@@ -2263,9 +2263,8 @@ class GPU:
     def clock_step_khz(self):
         """This card's core-clock grid in kHz, derived from the driver.
 
-        The lockable-clock table IS the enumeration of legal core clocks, so
-        the step is just its span divided by its gaps - no per-architecture
-        constant, and it would have caught this the first time. Checked:
+        Use span divided by gaps within the upper, contiguous boost regime.
+        Older GPUs can mix divider regimes within one clock table. Checked:
             TU102   360..2160 over 121 entries -> 1800/120 = 15.000 MHz
             GP102   139..1911 over 141 entries -> 1772/140 = 12.657 MHz
 
@@ -2283,7 +2282,17 @@ class GPU:
         step = None
         try:
             table = self.lockable_clocks_by_mem() or []
-            best = max((cl for _mem, cl in table), key=len, default=[])
+            best = sorted(set(max((cl for _mem, cl in table), key=len, default=[])))
+            # Kepler mixes divider regimes: the GTX 770 list starts with
+            # ~2 MHz gaps and ends with ~13 MHz boost bins. Averaging those
+            # regimes invents a 5.523 MHz grid. Measure the contiguous upper
+            # regime, allowing integer rounding of a fractional clock bin.
+            if len(best) >= 8:
+                top_gap = best[-1] - best[-2]
+                start = len(best) - 2
+                while start > 0 and abs((best[start] - best[start - 1]) - top_gap) <= 1:
+                    start -= 1
+                best = best[start:]
             if len(best) >= 8:
                 span = max(best) - min(best)
                 if span > 0:
@@ -2422,8 +2431,8 @@ class GPU:
 
     def arch(self):
         """This card's architecture as NVML's enum, or ``None``."""
-        nv = self.nvml
-        if not (nv.ok and nv.has("nvmlDeviceGetArchitecture")):
+        nv = getattr(self, "nvml", None)
+        if not (nv and nv.ok and nv.has("nvmlDeviceGetArchitecture")):
             return None
         a = u32(0)
         if nv.dll.nvmlDeviceGetArchitecture(nv.dev, ctypes.byref(a)) != 0:
@@ -2536,6 +2545,11 @@ class GPU:
         candidate by architecture, then require a successful one-domain GET
         and an exact version echo before any read or write can use it.
         """
+        # GK104 accepts this getter and echoes zero-filled Turing-shaped
+        # records. Neither the field meanings nor voltage response have been
+        # established on Kepler; successful GET alone cannot authorize SET.
+        if self.arch() == 2:
+            return None
         cached = getattr(self, "_clkdom_layout_cache", None)
         if cached is not None:
             return None if cached is False else cached
@@ -3063,6 +3077,8 @@ class GPU:
         core_mhz the naming runs BLIND: it cannot apply the unpopulated check,
         so it names a dead domain 0 'GPC' and reports every card as Turing.
         That is how an earlier build mislabelled a GP102."""
+        if self.arch() == 2:
+            return {}
         if getattr(self, "_clkdom_pair", None):
             return self._clkdom_pair
         if rows is None:

@@ -1917,7 +1917,7 @@ class Druta:
                                 # MEMORY on this card. The row appears only where the
                                 # private control block answers, so a card without it shows
                                 # no dead knob.
-                                if self.gpu.clkdom_ok():
+                                if self.gpu.clkdom_layout() is not None:
                                     cur, _ = self.gpu.read_clk_domain_offsets()
                                     cur = cur or {}
                                     # via read(), not read_clock_domains(): the bare call
@@ -2046,21 +2046,19 @@ class Druta:
                             with dpg.table(header_row=False, no_host_extendX=True,
                                            policy=dpg.mvTable_SizingFixedFit):
                                 self.knob_cols()
-                                pl_lo = st.get("pl_min_mw", 100000) // 1000
-                                pl_hi = st.get("pl_max_mw", 320000) // 1000
-                                pl_def = st.get("pl_def_mw", 260000) // 1000
-                                self.slider_row("pl", "Power limit (W)", pl_lo, pl_hi,
-                                                pl_def, self.apply_pl,
-                                                extra=("Stock",
-                                                       lambda: self.stock_knob("pl")))
+                                if all(k in st for k in ("pl_min_mw", "pl_max_mw", "pl_def_mw")):
+                                    self.slider_row("pl", "Power limit (W)",
+                                                    st["pl_min_mw"] // 1000,
+                                                    st["pl_max_mw"] // 1000,
+                                                    st["pl_def_mw"] // 1000, self.apply_pl,
+                                                    extra=("Stock", lambda: self.stock_knob("pl")))
 
                                 vb = self.gpu.read_voltage_boost()
                                 # raises the reliability-voltage ceiling
-                                self.slider_row("volt", "Core voltage boost (%)", 0, 100,
-                                                0 if vb is None else max(0, min(100, int(vb))),
-                                                self.apply_volt,
-                                                extra=("Stock",
-                                                       lambda: self.stock_knob("volt")))
+                                if vb is not None:
+                                    self.slider_row("volt", "Core voltage boost (%)", 0, 100,
+                                                    max(0, min(100, int(vb))), self.apply_volt,
+                                                    extra=("Stock", lambda: self.stock_knob("volt")))
 
                                 # The ceiling the boost slider above is actually
                                 # working against. Worth showing rather than
@@ -2091,8 +2089,8 @@ class Druta:
                                 # been measured. Measured 1:1 on its own with the core
                                 # clock pinned by FREQUENCY - pinning by voltage instead
                                 # gives a smaller, wrong answer (see set_rail_offset_mv).
-                                if self.gpu.clkdom_ok():
-                                    rv = self.gpu.read_rail_offset_mv(0)
+                                rv = self.gpu.read_rail_offset_mv(0)
+                                if rv is not None:
                                     # Adds to NVVDD on the card's 6.25 mV grid. Measured
                                     # 1:1 on TU102 with the clock pinned; the response can
                                     # be far smaller elsewhere - on GP102 at idle, 100 mV
@@ -2708,6 +2706,9 @@ class Druta:
         if not self.vf_points:
             self.vf_read()
         curve = bool(self.vf_points)
+        if not curve:
+            self.log("max: V/F curve unavailable on this card; nothing was changed", False)
+            return
 
         if curve:
             # REFUSE ON A DIRTY WORKING COPY. vf_deflatten stages ON TOP of

@@ -141,3 +141,41 @@ The real GUI switch checks alternated RTX's 128-point and Xp's 80-point
 curves without disappearing curves or leaked GUI items. A clean curve
 switches immediately; actual staged edits require the existing confirmation.
 If the new GPU cannot initialize, the previous curve and edits remain intact.
+
+## GTX 770 / Kepler, driver 472.12
+
+Verified on PCI device 1184, subsystem 1033196e, VBIOS 80.04.c3.00.01.
+The GTX 770 occupies 0000:02:00.0; the TITAN RTX remains at 0000:01:00.0.
+Machine-readable results: `experiments/kepler-validation-47212.json`.
+
+- NVAPI and NVML identify the same card. Temperature, clocks, utilization,
+  fan duty/RPM and relative power telemetry read successfully. Absolute watts
+  and a writable NVML power-limit range are unavailable through the current backend.
+- Two repeated load/restore cycles: a +26 MHz core request is snapped to
+  +27 MHz and moves the measured core from 1175 to 1201 MHz. A +25 true MHz
+  memory request moves the driver's reported memory clock from 3505 to
+  3557 MHz. Both return to baseline after restoring zero offsets.
+- Manual fan 50% and restoration to automatic policy work. The original
+  automatic duty settles back to 26%; duty during spin-down is not a stored
+  manual request. Tests stayed below 46 degrees C.
+- Profile restore with `apply_curve=False` restores core, memory and fan policy.
+  A full profile is still marked incomplete because no V/F table was captured;
+  automatic Windows sign-in application was not enabled or tested on this card.
+- Repeated RTX -> GTX 770 -> RTX switching recovers all 128 RTX curve points.
+  The Kepler V/F getter reports unavailable, not a fabricated zero-frequency point.
+- nvtune read-only timing capture succeeds with 33 decoded fields and stable
+  3505 MHz memory around the capture. Register decoding and timing writes are
+  not independently validated on this board; no timing writes were performed.
+- No shipped I2C regulator profile matches this board. Voltage boost, live
+  NVVDD/MSVDD rail readings and confirmed per-rail limits are unavailable.
+  The private clock-control getter accepts masks and echoes zero-filled records;
+  this does not establish its field meanings or a physical voltage response.
+  No private clock-domain or rail writes were attempted on Kepler.
+
+Fixes from this round: infer the boost clock grid from the contiguous upper
+clock-list regime (13.049 MHz here), rather than averaging the mixed Kepler
+regimes into 5.523 MHz; block the unvalidated Kepler private layout and mapping;
+hide private offsets and unavailable power/voltage sliders; refuse Max it before
+any writes when the V/F curve cannot be read. Regular and limited de-flatten
+remain unavailable on this adapter. These observations do not establish a
+Kepler voltage ceiling or maximum stable overclock.
