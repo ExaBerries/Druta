@@ -2423,6 +2423,7 @@ class GPU:
 
     # NVML's own architecture enum. Kepler 2, Maxwell 3, Pascal 4, Volta 5,
     # Turing 6, Ampere 7, Ada 8, Hopper 9, Blackwell 10.
+    ARCH_KEPLER = 2
     ARCH_PASCAL = 4
     ARCH_TURING = 6
     ARCH_NAMES = {2: "Kepler", 3: "Maxwell", 4: "Pascal", 5: "Volta",
@@ -2441,6 +2442,14 @@ class GPU:
 
     def arch_name(self):
         return self.ARCH_NAMES.get(self.arch() or -1)
+
+    def vf_curve_applicable(self):
+        """Kepler uses ordinary clock offsets, not this V/F table mechanism.
+
+        Other architectures retain their existing runtime layout validation;
+        an unavailable read must not be mistaken for an inapplicable curve.
+        """
+        return self.arch() != self.ARCH_KEPLER
 
     # WHAT WAS ACTUALLY MEASURED, per (architecture, control domain). Absent
     # means nobody has looked, and absent must not be read as either answer.
@@ -3398,6 +3407,8 @@ class GPU:
         """Both ends of the pair must resolve. The getter alone is a reader;
         without the setter there is no write path, and half a pair must never
         look like a working one."""
+        if not self.vf_curve_applicable():
+            return False
         a = self.nvapi
         return bool(a.ok and a.BoostLock and a.VfLockSet)
 
@@ -3407,6 +3418,8 @@ class GPU:
         buffer the driver produced - rather than one we assembled from a struct
         definition - is what makes this setter safe, and it is how it was
         validated. Nothing below ever constructs a _ClockLock to write."""
+        if not self.vf_curve_applicable():
+            return None
         a = self.nvapi
         if not (a.ok and a.BoostLock):
             return None
@@ -4724,6 +4737,8 @@ class GPU:
     def read_vf_curve(self):
         """Return (points, err). points = list of dicts sorted by curve index:
         {idx, volt_mv, freq_mhz (evaluated, includes current deltas), delta_khz}."""
+        if not self.vf_curve_applicable():
+            return None, "V/F curves are not applicable on Kepler"
         a = self.nvapi
         if not (a.ok and a.VfpCurve and a.BoostTableGet):
             return None, "VF curve APIs unavailable"
@@ -4847,6 +4862,8 @@ class GPU:
            which cannot be true. Halved, none are.
 
         Returns None if the curve APIs are unavailable or nothing answers."""
+        if not self.vf_curve_applicable():
+            return None
         cached = getattr(self, "_vfp_layout_cache", None)
         if cached is not None and not force:
             return cached
@@ -5551,6 +5568,8 @@ class GPU:
         idx -> absolute delta_khz; only differing rows are touched. Bounds only
         against accidental user mouse slip or other sorts of garbage (|delta| <= 1 GHz), so legitimate de-flatten compounding
         and deliberate editor moves are never blocked."""
+        if not self.vf_curve_applicable():
+            return False, "V/F curves are not applicable on Kepler"
         a = self.nvapi
         if not (a.ok and a.BoostTableGet and a.BoostTableSet):
             return False, "boost-table APIs unavailable"
@@ -5680,7 +5699,7 @@ class GPU:
         steps.append(ResetStep("fan", self.reset_fan()))
         if self.nvapi.ok and self.nvapi.VoltCtrlGet and self.nvapi.VoltCtrlSet:
             steps.append(ResetStep("voltage boost", self.set_voltage_boost(0)))
-        if self.nvapi.ok and self.nvapi.BoostTableSet:
+        if self.vf_curve_applicable() and self.nvapi.ok and self.nvapi.BoostTableSet:
             # curve edits live here too
             steps.append(ResetStep("vf curve", self.reset_vf_curve()))
         return steps

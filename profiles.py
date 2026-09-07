@@ -52,12 +52,16 @@ KEEP_AUTOSAVES = 20
 INCOMPLETE_KEY = "incomplete"
 
 
+def vf_applicable(gpu):
+    return getattr(gpu, "vf_curve_applicable", lambda: True)()
+
+
 def incomplete(state):
     """What this snapshot is MISSING, as human-readable strings (empty = it is
     whole). A profile written before this field existed reports nothing missing
     unless its V/F table is absent, which is the case that matters."""
     miss = list(state.get(INCOMPLETE_KEY) or [])
-    if not miss and not state.get("vf_deltas"):
+    if not miss and not state.get("vf_deltas") and state.get("vf_applicable") is not False:
         miss.append("V/F delta table NOT captured")
     return miss
 
@@ -145,6 +149,7 @@ def capture(gpu, rail=None):
         "fan_manual": None,
         "fan_control_state": None,
         "vf_deltas": None,
+        "vf_applicable": vf_applicable(gpu),
         INCOMPLETE_KEY: [],
     }
     # Modern NVML and the legacy NVAPI fallbacks expose requested per-fan
@@ -166,11 +171,11 @@ def capture(gpu, rail=None):
     except Exception:
         pass
     try:
-        pts, err = gpu.read_vf_curve()
+        pts, err = gpu.read_vf_curve() if state["vf_applicable"] else (None, None)
         if pts:
             state["vf_deltas"] = {str(p["idx"]): int(p["delta_khz"])
                                   for p in pts}
-        else:
+        elif state["vf_applicable"]:
             state[INCOMPLETE_KEY].append(
                 f"V/F delta table NOT captured ({err or 'no points returned'})")
     except Exception as e:
@@ -281,6 +286,10 @@ def preflight(gpu, state, rail=None):
     """
     if not isinstance(state, dict) or state.get("schema", 1) not in (1, SCHEMA):
         return "unsupported profile format"
+    if state.get("vf_applicable") is False and vf_applicable(gpu):
+        return "this GPU requires a V/F snapshot; save a fresh profile on this card"
+    if state.get("vf_deltas") and not vf_applicable(gpu):
+        return "V/F curve profiles cannot be applied to Kepler"
     limits = state.get("rail_limits_mv") or {}
     offsets = state.get("clock_domain_offsets_mhz") or {}
     i2c = state.get("i2c")
@@ -544,7 +553,7 @@ def restore(gpu, state, apply_curve=True, *, rail=None, i2c_verified=False):
                                "restored - use Auto or Reset all to stock"))
 
     # LAST, and authoritative: the delta table subsumes the core offset above.
-    if apply_curve:
+    if apply_curve and vf_applicable(gpu):
         if state.get("vf_deltas"):
             deltas = {int(k): int(v) for k, v in state["vf_deltas"].items()}
             step("v/f curve", lambda: gpu.apply_vf_deltas(deltas))

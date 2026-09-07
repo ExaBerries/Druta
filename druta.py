@@ -364,6 +364,9 @@ class Druta:
         the exact kHz value; only the arrow keys and the sliders see this."""
         return max(1, int(round(self.step_khz() / 1000.0)))
 
+    def vf_applicable(self):
+        return profiles.vf_applicable(self.gpu)
+
     def vf_freq_div(self):
         """Raw V/F delta units per physical core kHz (2 on Pascal)."""
         gpu = getattr(self, "gpu", None)
@@ -382,6 +385,8 @@ class Druta:
         GPU points inside an 84-entry table whose last four rows are the memory
         V/F points. Falls back to whatever the editor is currently holding, then
         to the struct capacity, so this can never raise inside a tooltip."""
+        if not self.vf_applicable():
+            return 0
         gpu = getattr(self, "gpu", None)
         lay = gpu.vfp_layout() if gpu is not None else None
         if lay is not None:
@@ -1742,61 +1747,62 @@ class Druta:
                 dpg.add_button(label="Reset all to stock", callback=self.reset_all,
                                width=self.s(200), height=self.s(28))
                 dpg.add_spacer(width=self.s(20))
-                # Beside 'Reset all to stock' deliberately: they are the two
-                # ends of the same axis, and the way back should never be
-                # further from the hand than the way out.
-                dpg.add_button(label="Max it  (fan + power + volts + curve)",
-                               tag="go_ocmax", callback=self.oc_max,
-                               width=self.s(330), height=self.s(28))
-                # ORANGE. Not red - red in this app means "this writes the
-                # memory controller and can hang the machine" (tw_apply) and
-                # that meaning should not be diluted. Not green either: green
-                # is the ordinary V/F apply. Orange is its own band, for the
-                # one button that moves four knobs at once.
-                with dpg.theme() as ocmax_th:
-                    with dpg.theme_component(dpg.mvAll):
-                        dpg.add_theme_color(dpg.mvThemeCol_Button, (168, 88, 16))
-                        dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered,
-                                            (206, 112, 24))
-                        dpg.add_theme_color(dpg.mvThemeCol_ButtonActive,
-                                            (238, 138, 34))
-                        dpg.add_theme_color(dpg.mvThemeCol_Text, (24, 16, 6))
-                dpg.bind_item_theme("go_ocmax", ocmax_th)
-                self._ctl_widgets.append("go_ocmax")
-                with dpg.tooltip(dpg.last_item()):
-                    dpg.add_text(
-                        "The four things done by hand at the start of every\n"
-                        "session, in one click and in a safe order:\n\n"
-                        "  1. fan            -> 100%\n"
-                        "  2. power limit    -> this card's maximum\n"
-                        "  3. voltage boost  -> 100%\n"
-                        "  4. V/F curve      -> de-flatten, apply, then hold\n"
-                        "                       the cap point (same as Ctrl+H)\n\n"
-                        "Headroom first, clocks last: cooling before the power\n"
-                        "budget rises, budget before the extra voltage spends\n"
-                        "it, and the curve last because it is the only step\n"
-                        "that asks for more clock.\n\n"
-                        "ONE undo point covers the four WRITES - Profiles >\n"
-                        "Undo last write puts them back.\n\n"
-                        "IT DOES NOT RELEASE THE HOLD. A lock is driver state,\n"
-                        "not a profile value, so Undo leaves the card pinned.\n"
-                        "Press Ctrl+H, the Release button, or 'Reset all to\n"
-                        "stock' - which returns everything to factory AND\n"
-                        "drops the hold.\n\n"
-                        "Steps are independent: a card that refuses one still\n"
-                        "gets the rest, and each outcome is logged.\n\n"
-                        "The fans stay at 100% MANUAL until you press Auto or\n"
-                        "Reset all to stock - they do not ramp back down.\n\n"
-                        "De-flatten works BELOW the voltage cap in the V/F\n"
-                        "editor's cap box, so that box bounds what 'max'\n"
-                        "means. Refused if V/F edits are already staged - it\n"
-                        "will not write a plan it did not make.\n\n"
-                        "De-flatten usually LOWERS the curve's nominal top:\n"
-                        "the cap point becomes the unique peak so the arbiter\n"
-                        "parks THERE instead of at the bottom of a flat run.\n"
-                        "The log says so each time.\n\n"
-                        "This raises voltage, power and clocks together. It is\n"
-                        "an overclock, and it can destabilise the driver.")
+                if self.vf_applicable():
+                    # Beside 'Reset all to stock' deliberately: they are the two
+                    # ends of the same axis, and the way back should never be
+                    # further from the hand than the way out.
+                    dpg.add_button(label="Max it  (fan + power + volts + curve)",
+                                   tag="go_ocmax", callback=self.oc_max,
+                                   width=self.s(330), height=self.s(28))
+                    # ORANGE. Not red - red in this app means "this writes the
+                    # memory controller and can hang the machine" (tw_apply) and
+                    # that meaning should not be diluted. Not green either: green
+                    # is the ordinary V/F apply. Orange is its own band, for the
+                    # one button that moves four knobs at once.
+                    with dpg.theme() as ocmax_th:
+                        with dpg.theme_component(dpg.mvAll):
+                            dpg.add_theme_color(dpg.mvThemeCol_Button, (168, 88, 16))
+                            dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered,
+                                                (206, 112, 24))
+                            dpg.add_theme_color(dpg.mvThemeCol_ButtonActive,
+                                                (238, 138, 34))
+                            dpg.add_theme_color(dpg.mvThemeCol_Text, (24, 16, 6))
+                    dpg.bind_item_theme("go_ocmax", ocmax_th)
+                    self._ctl_widgets.append("go_ocmax")
+                    with dpg.tooltip(dpg.last_item()):
+                        dpg.add_text(
+                            "The four things done by hand at the start of every\n"
+                            "session, in one click and in a safe order:\n\n"
+                            "  1. fan            -> 100%\n"
+                            "  2. power limit    -> this card's maximum\n"
+                            "  3. voltage boost  -> 100%\n"
+                            "  4. V/F curve      -> de-flatten, apply, then hold\n"
+                            "                       the cap point (same as Ctrl+H)\n\n"
+                            "Headroom first, clocks last: cooling before the power\n"
+                            "budget rises, budget before the extra voltage spends\n"
+                            "it, and the curve last because it is the only step\n"
+                            "that asks for more clock.\n\n"
+                            "ONE undo point covers the four WRITES - Profiles >\n"
+                            "Undo last write puts them back.\n\n"
+                            "IT DOES NOT RELEASE THE HOLD. A lock is driver state,\n"
+                            "not a profile value, so Undo leaves the card pinned.\n"
+                            "Press Ctrl+H, the Release button, or 'Reset all to\n"
+                            "stock' - which returns everything to factory AND\n"
+                            "drops the hold.\n\n"
+                            "Steps are independent: a card that refuses one still\n"
+                            "gets the rest, and each outcome is logged.\n\n"
+                            "The fans stay at 100% MANUAL until you press Auto or\n"
+                            "Reset all to stock - they do not ramp back down.\n\n"
+                            "De-flatten works BELOW the voltage cap in the V/F\n"
+                            "editor's cap box, so that box bounds what 'max'\n"
+                            "means. Refused if V/F edits are already staged - it\n"
+                            "will not write a plan it did not make.\n\n"
+                            "De-flatten usually LOWERS the curve's nominal top:\n"
+                            "the cap point becomes the unique peak so the arbiter\n"
+                            "parks THERE instead of at the bottom of a flat run.\n"
+                            "The log says so each time.\n\n"
+                            "This raises voltage, power and clocks together. It is\n"
+                            "an overclock, and it can destabilise the driver.")
             dpg.add_text("writes ENABLED - untick for read-only. "
                          "All changes are reversible and reset on reboot",
                          tag="unlock_note", color=DIM)
@@ -2172,9 +2178,10 @@ class Druta:
                                         xoc_lo=int(rp.hw_min_mv),
                                         xoc_hi=int(rp.hw_max_mv))
 
-            with dpg.collapsing_header(label="V/F curve editor",
-                                       default_open=True):
-                self.build_vf()
+            if self.vf_applicable():
+                with dpg.collapsing_header(label="V/F curve editor",
+                                           default_open=True):
+                    self.build_vf()
 
             dpg.add_separator()
             dpg.add_text("log  (newest line first)", color=DIM)
@@ -2417,7 +2424,7 @@ class Druta:
         fan_caps = self.gpu.fan_capabilities()
         fan_manual = fan_caps["manual"]
         fan_auto = fan_caps["auto"]
-        frequency_lock = self.gpu.arch() != GPU.ARCH_PASCAL
+        frequency_lock = self.gpu.arch() not in (GPU.ARCH_KEPLER, GPU.ARCH_PASCAL)
         for tag in self._ctl_widgets:
             if dpg.does_item_exist(tag):
                 available = (fan_manual if tag in ("sl_fan", "in_fan", "go_fan")
@@ -2430,8 +2437,9 @@ class Druta:
             dpg.set_value("unlock_note",
                           "writes ENABLED - untick for read-only. All changes "
                           "are reversible and reset on reboot" if on else
-                          "READ-ONLY - every write control below is disabled "
-                          "(curve edits are still staged, not written)")
+                          "READ-ONLY - every write control below is disabled"
+                          + (" (curve edits are still staged, not written)"
+                             if self.vf_applicable() else ""))
             dpg.configure_item("unlock_note", color=DIM if on else WARN)
 
     # ---- write handlers (identical backend calls to the Tk build) ---------- #
@@ -2716,6 +2724,8 @@ class Druta:
         Steps are independent: a card that refuses one still gets the rest,
         and every outcome is logged. A refusal here is ordinary - not every
         card exposes a voltage boost, and fan control needs admin."""
+        if not self.vf_applicable():
+            return
         if not self.guard():
             return
         st = self.gpu.static
@@ -3708,6 +3718,8 @@ class Druta:
         second NVAPI round trip on the UI thread - and it guarantees the editor
         rebases on exactly the points the post-write prediction check was
         verified against, not on a later read that may have moved."""
+        if not self.vf_applicable():
+            return
         pending = sum(1 for i in self.vf_work
                       if self.vf_work.get(i) != self.vf_orig.get(i))
         if pending and not force:
@@ -4788,6 +4800,8 @@ class Druta:
         (update_plan_banner), and autosave_before makes the write recoverable -
         which is strictly more than the press-again arm gave, since that only
         described the plan once the user had already committed to pressing."""
+        if not self.vf_applicable():
+            return
         if not self.guard() or not self.vf_points:
             return
         # RE-PHASE THE STAGED DELTAS, BEFORE PLANNING, so exactly one write
@@ -4874,6 +4888,8 @@ class Druta:
         """Stage the de-flatten plan onto the working copy - PREVIEW only.
         Nothing reaches the GPU until Apply to GPU. This restores the
         look-before-you-write step the Tk build had as a confirm dialog."""
+        if not self.vf_applicable():
+            return
         if not self.vf_points:
             self.log("read the curve first", False)
             return
@@ -4960,6 +4976,8 @@ class Druta:
         a descending card fine-grained operating points to walk down through.
         `Hard de-flatten` (vf_hard_deflatten) is the opposite transform for the
         opposite problem - throttling that should not happen at all."""
+        if not self.vf_applicable():
+            return
         if not self.vf_points:
             self.log("read the curve first", False)
             return
@@ -5105,6 +5123,8 @@ class Druta:
         down as 700.00 mV, worst case 1530 -> 1965 MHz - with no delta written to
         any of them. That belongs in front of the user before the click, not in a
         post-mortem, so it goes in the staged plan."""
+        if not self.vf_applicable():
+            return
         if not self.vf_points:
             self.log("read the curve first", False)
             return
@@ -5179,6 +5199,8 @@ class Druta:
         top of it corrects a curve that is about to be replaced. With nothing
         staged the working copy IS the hardware, so the no-edit case still does
         what it always did - it just goes through Apply like everything else."""
+        if not self.vf_applicable():
+            return
         if not self.vf_points:
             self.log("read the curve first", False)
             return
@@ -5209,6 +5231,8 @@ class Druta:
         discarded edits recoverable. 'Reset all to stock' is the one that still
         arms - it drops every knob at once, not just this table. Behind the
         unlock gate like every other write."""
+        if not self.vf_applicable():
+            return
         if not self.guard():
             return
         pending = sum(1 for i in self.vf_work
@@ -5450,12 +5474,13 @@ deliberately does not put behind a button."""
         self._pending_load = pend
         if not dpg.does_item_exist("prof_warn"):
             return
+        detail = (f"A V/F table is {self.n_vf_rows()} frequencies measured on "
+                  "one piece of silicon; on another die they are a guess. "
+                  if self.vf_applicable() else
+                  "Clock and voltage settings were captured on another device. ")
         dpg.set_value("prof_warn", "" if not pend else
-                      f"⚠  '{pend[0]}': {pend[1]}.\nA V/F table is "
-                      f"{self.n_vf_rows()} frequencies measured on ONE piece "
-                      f"of silicon - "
-                      f"on another die they are a guess. Press Load on that "
-                      f"row again to restore it anyway.")
+                      f"⚠  '{pend[0]}': {pend[1]}.\n{detail}"
+                      "Press Load on that row again to restore it anyway.")
         dpg.configure_item("prof_warn", show=bool(pend))
         # a refusal the user cannot see is just a dead button. This is also
         # reached from the menu's 'Undo last write', where the window may not
@@ -5804,17 +5829,20 @@ deliberately does not put behind a button."""
                 # which is what you want for severe thermal throttling with
                 # aggressive undervolting, and not what you want the rest of
                 # the time. The full ramp is the default now.
-                dpg.add_text("LIMITED DE-FLATTEN", color=ACCENT)
-                dpg.add_text("Makes only the cap point the unique top; leaves\n"
-                             "the rest of the band alone. Niche - the V/F tab's\n"
-                             "'De-flatten' rebuilds the whole band and is the\n"
-                             "one to reach for first.", color=DIM)
-                dpg.add_button(label="Limited de-flatten ≤ cap",
-                               tag="go_deflat_ltd", width=self.s(230),
-                               callback=self.vf_deflatten)
-                dpg.add_separator()
+                if self.vf_applicable():
+                    dpg.add_text("LIMITED DE-FLATTEN", color=ACCENT)
+                    dpg.add_text("Makes only the cap point the unique top; leaves\n"
+                                 "the rest of the band alone. Niche - the V/F tab's\n"
+                                 "'De-flatten' rebuilds the whole band and is the\n"
+                                 "one to reach for first.", color=DIM)
+                    dpg.add_button(label="Limited de-flatten ≤ cap",
+                                   tag="go_deflat_ltd", width=self.s(230),
+                                   callback=self.vf_deflatten)
+                    dpg.add_separator()
                 dpg.add_text("GPU CLOCK LOCK", color=ACCENT)
-                if self.gpu.arch() == GPU.ARCH_PASCAL:
+                if self.gpu.arch() == GPU.ARCH_KEPLER:
+                    dpg.add_text("NVML GPU and memory clock locks are unavailable on Kepler.", color=DIM)
+                elif self.gpu.arch() == GPU.ARCH_PASCAL:
                     dpg.add_text("NVML frequency locking is unavailable on Pascal.\n"
                                  "Use Ctrl+H on the V/F curve to hold a point.", color=DIM)
                 else:
@@ -5857,16 +5885,18 @@ deliberately does not put behind a button."""
                             "the card is already boosting past it, locking max\n"
                             "will LOWER the clock. This is for holding one\n"
                             "frequency steady, not for going fast.")
-                dpg.add_text("the result is one line in the Control tab log.\n"
-                             "Ctrl+H on the curve editor is a DIFFERENT lock\n"
-                             "(V/F point, by voltage); taking one releases the\n"
-                             "other, and at idle this one drops memory to 810",
-                             color=DIM)
+                if self.vf_applicable():
+                    dpg.add_text("the result is one line in the Control tab log.\n"
+                                 "Ctrl+H on the curve editor is a DIFFERENT lock\n"
+                                 "(V/F point, by voltage); taking one releases the\n"
+                                 "other, and at idle this one drops memory to 810",
+                                 color=DIM)
             self._ctl_widgets += ["lock_min", "lock_max", "go_lock",
                                   "go_release", "go_lockmax"]
             with dpg.menu(label="Help"):
-                dpg.add_menu_item(label="Keyboard shortcuts",
-                                  user_data="win_keys", callback=self.show_win)
+                if self.vf_applicable():
+                    dpg.add_menu_item(label="Keyboard shortcuts",
+                                      user_data="win_keys", callback=self.show_win)
                 # Not optional furniture. This is how a recipient of the
                 # onefile exe actually gets at the licence text bundled with
                 # it - see resource_path and Druta.spec's datas.
@@ -5886,6 +5916,8 @@ deliberately does not put behind a button."""
         """Built per card, not a class constant: the bin is 15 MHz on TU102 and
         12.657 on GP102, and a shortcut list that states the wrong one is the
         same defect as a button labelled '+15' that moves 12.657."""
+        if not self.vf_applicable():
+            return []
         b = self.step_mhz()
         return [
         ("W / S", f"move the selected point +/- {b} MHz (one clock bin)"),
@@ -5947,8 +5979,9 @@ deliberately does not put behind a button."""
                         pos=[self.s(200), self.s(180)]):
             dpg.add_text("Snapshots clock offsets, power, voltage boost, fan policy, "
                          "confirmed per-rail limits, NVVDD offset, the I2C regulator "
-                         "offset and XOC mode, plus all "
-                         f"{self.n_vf_rows()} V/F deltas, as JSON in profiles/ "
+                         "control and XOC mode"
+                         + (f", plus all {self.n_vf_rows()} V/F deltas"
+                            if self.vf_applicable() else "") + ", as JSON in profiles/ "
                          "next to the app. Saving writes nothing to the GPU.",
                          color=DIM, wrap=self.s(520))
             dpg.add_spacer(height=self.s(6))
@@ -5972,8 +6005,9 @@ deliberately does not put behind a button."""
                         width=self.s(1080), height=self.s(560),
                         pos=[self.s(90), self.s(90)]):
             dpg.add_text("Load restores saved rail limits, voltage/clock offsets, "
-                         "I2C offset and XOC mode, power, voltage boost, fan policy "
-                         "and the V/F table. An undo point is taken first. I2C is "
+                         "I2C control and XOC mode, power, voltage boost, fan policy"
+                         + (" and the V/F table" if self.vf_applicable() else "")
+                         + ". An undo point is taken first. I2C is "
                          "verified under load. Every control reports its result "
                          "in the Control log.", tag="prof_load_note", color=WARN, wrap=self.s(1040))
             dpg.add_text("Load at startup keeps a copy and launches Druta at Windows "
@@ -6005,29 +6039,30 @@ deliberately does not put behind a button."""
                         dpg.add_table_column(label=label, width_fixed=True,
                                              init_width_or_weight=self.s(w))
 
-        with dpg.window(label="Keyboard shortcuts", tag="win_keys", show=False,
-                        width=self.s(620), height=self.s(460),
-                        pos=[self.s(140), self.s(120)]):
-            dpg.add_text("V/F CURVE EDITOR", color=ACCENT)
-            dpg.add_separator()
-            with dpg.table(header_row=False, no_host_extendX=True,
-                           policy=dpg.mvTable_SizingFixedFit):
-                dpg.add_table_column(width_fixed=True,
-                                     init_width_or_weight=self.s(130))
-                dpg.add_table_column(width_fixed=True,
-                                     init_width_or_weight=self.s(430))
-                for keys, what in self.vf_keys():
-                    with dpg.table_row():
-                        dpg.add_text(keys, color=ACCENT)
-                        # wrapped to the column: a fixed-fit table does not
-                        # wrap on its own, so the longer rows would run out
-                        # past the window edge instead of onto a second line
-                        dpg.add_text(what, color=TEXT, wrap=self.s(420))
-            dpg.add_spacer(height=self.s(8))
-            dpg.add_text("The key handlers are window-wide, not plot-local, but "
-                         "they stand down while a text or number box has focus - "
-                         "so W/A/S/D typed into the cap, index or MHz box do not "
-                         "also retune the curve.", color=DIM, wrap=self.s(580))
+        if self.vf_applicable():
+            with dpg.window(label="Keyboard shortcuts", tag="win_keys", show=False,
+                            width=self.s(620), height=self.s(460),
+                            pos=[self.s(140), self.s(120)]):
+                dpg.add_text("V/F CURVE EDITOR", color=ACCENT)
+                dpg.add_separator()
+                with dpg.table(header_row=False, no_host_extendX=True,
+                               policy=dpg.mvTable_SizingFixedFit):
+                    dpg.add_table_column(width_fixed=True,
+                                         init_width_or_weight=self.s(130))
+                    dpg.add_table_column(width_fixed=True,
+                                         init_width_or_weight=self.s(430))
+                    for keys, what in self.vf_keys():
+                        with dpg.table_row():
+                            dpg.add_text(keys, color=ACCENT)
+                            # wrapped to the column: a fixed-fit table does not
+                            # wrap on its own, so the longer rows would run out
+                            # past the window edge instead of onto a second line
+                            dpg.add_text(what, color=TEXT, wrap=self.s(420))
+                dpg.add_spacer(height=self.s(8))
+                dpg.add_text("The key handlers are window-wide, not plot-local, but "
+                             "they stand down while a text or number box has focus - "
+                             "so W/A/S/D typed into the cap, index or MHz box do not "
+                             "also retune the curve.", color=DIM, wrap=self.s(580))
 
         with dpg.window(label="Shunt mod", tag="win_shunt", show=False,
                         width=self.s(900), height=self.s(560),
@@ -7395,6 +7430,8 @@ deliberately does not put behind a button."""
         reason to fall back to the load, not to give up: a locked gate, a card
         with no readable V/F table, or an NVAPI that will not take the lock all
         leave the CUDA path perfectly able to reach the band."""
+        if not self.vf_applicable():
+            return False
         if not self.unlocked():
             self.log("read: controls are locked, so the P0 hold was skipped - "
                      "falling back to a GPU load", None)

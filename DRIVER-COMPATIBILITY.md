@@ -16,12 +16,12 @@ column describes the TITAN boards; GTX 770 was tested only on 472.12.
 | V/F point lock | Confirmed | Confirmed during loaded offset checks; exact lock restored | Confirmed during loaded offset checks; exact lock restored | Unavailable through the current V/F path |
 | Fan duty, RPM, manual control and Auto | Confirmed | Both fan controls' requested levels and Auto policies verified through NVAPI; zero RPM is expected on this water-cooled card | Manual duty/RPM response and Auto verified through NVAPI cooler controls | Manual 50%, RPM response and exact Auto-policy restoration confirmed |
 | Clock event/performance-limit reasons | Confirmed | Legacy NVML ThrottleReasons fallback implemented | Legacy NVML ThrottleReasons fallback implemented | NVAPI performance-decrease reasons readable |
-| V/F curve editing and de-flatten planners | Confirmed | Negative-point write/reset and raised-cap de-flatten confirmed | Negative-point write/reset and raised-cap de-flatten confirmed; the regular ramp no longer treats the stock clock-list maximum as an overclock ceiling | No supported V/F table; regular/limited de-flatten unavailable; switching back restores RTX’s 128 points |
+| V/F curve editing and de-flatten planners | Confirmed | Negative-point write/reset and raised-cap de-flatten confirmed | Negative-point write/reset and raised-cap de-flatten confirmed; the regular ramp no longer treats the stock clock-list maximum as an overclock ceiling | Not applicable: editor, planners, point locks and shortcuts suppressed; switching back restores RTX’s 128 points |
 | NVVDD rail offsets and all four limits | Confirmed; see voltage measurements below | Confirmed, including each live ceiling clamp and idle floor | Confirmed, including each live ceiling clamp; floor uses verified legacy re-send | Private layout unvalidated; controls blocked |
 | Per-domain clock offsets | Confirmed for mapped controls | XBAR, Additional Memory Clock Offset, SYS, VIDEO and LTC each moved by about +30 MHz under load | Additional Memory Clock Offset +25 MHz moved reported memory by +20.25 MHz twice; other paired controls remain hidden | Unvalidated; private controls hidden, including Additional Memory Clock Offset |
 | Power limit and voltage boost | Confirmed | Confirmed with independent readback | Confirmed with independent readback | NVML power-limit range and voltage-boost getter unavailable; sliders hidden |
 | NVML frequency lock | Works on Turing; unsupported on Pascal | Confirmed at 1500 MHz under load; legacy RM readback also sees another process's range | Unsupported baseline; V/F point lock remains available | GPU 1176..1176 MHz and memory 3505..3505 MHz both return Not Supported (3), while elevated |
-| Profiles, Undo, Reset all and Max it | Existing composite actions | All 13 UI callback checks passed; exact controls/table/lock restoration | All 13 UI callback checks passed; exact controls/table/lock restoration | Core/memory/fan profile restore verified with apply_curve=False; full profile incomplete; Max it refuses before writes without a curve |
+| Profiles, Undo, Reset all and Max it | Existing composite actions | All 13 UI callback checks passed; exact controls/table/lock restoration | All 13 UI callback checks passed; exact controls/table/lock restoration | Profiles omit the inapplicable V/F table; Reset all skips curve writes; Max it hidden. Core/memory/fan and I2C restoration verified separately; default profile replay covered by hardware-free tests |
 | I2C regulator control | Board/tool dependent | MP2888A verified under load: +75 mV request moved rail-minus-VID by +45 mV; original raw value restored | No matching regulator found on this board | NCP4206 absolute target verified at 1250/1262.5 mV; Auto and profile restoration exact |
 | Memory timing capture and writes | Board/tool dependent | Capture works; FAW 16→17 is dropped by hardware and reported as dropped | Capture, FAW 24→25 write, and exact restore confirmed | Capture and 15 delay fields verified; exact restoration; CL 18→19 triggered driver recovery (details below) |
 | MSVDD | Unavailable on these TITAN boards | Unavailable; no confirmed rail | Unavailable; no confirmed rail | No confirmed rail |
@@ -126,9 +126,11 @@ still be clipped in the evaluated curve by the driver's hardware ceiling.
 The staging and apply results report those cases, and a default Pascal ramp
 with no room for a whole clock bin reports no applicable change.
 
-GTX 770 profiles restore core/memory offsets and fan policy with
-`apply_curve=False`. A full profile remains incomplete without a V/F table;
-Windows sign-in profile application was not tested on that board.
+GTX 770 profiles record that the V/F table is inapplicable and restore ordinary
+controls without requiring a curve. Live capture and Kepler → RTX → Kepler UI
+switching passed; default profile replay and rejected cross-architecture curve
+payloads are covered by hardware-free tests. Missing curves on other cards
+remain incomplete. Windows sign-in profile application was not tested on GTX 770.
 
 The TITAN UI callback checks exercised Max it, its single Undo action,
 named-profile restoration, and Reset all on each card. All 13 checks per
@@ -242,9 +244,10 @@ Live checks stayed below the owner's 1350 mV test limit: 1250 and 1262.5 mV
 requests read 1248.05 and 1263.67 mV through VMON (0xD7, measured LINEAR11
 volts on this board). Verify uses a bounded +25 mV step under load and restores
 the prior mode. UI Apply/Auto and profile round trips restored 0x21/0xD2/0xD3
-exactly; 0xDD remained 3. Switching cards clears session verification. The full
-profile is still incomplete on Kepler without a V/F table; the tested profile
-round trips explicitly excluded curve restoration.
+exactly; 0xDD remained 3. Switching cards clears session verification. Those live
+round trips explicitly excluded curve restoration. New Kepler profiles omit
+the V/F requirement automatically; the corresponding default replay is tested
+with fake hardware.
 
 Support currently matches GTX 770 PCI 1184 / subsystem 1033196e and the
 observed controller identity at port 2. The other reported GPU families remain

@@ -1,11 +1,71 @@
 # Copyright (C) 2026 Thermetery Technology Co Limited
 # SPDX-License-Identifier: GPL-3.0-or-later
 import unittest
+import threading
 from types import SimpleNamespace
 from unittest.mock import Mock
 from nvbackend import GPU
 
 class KeplerTests(unittest.TestCase):
+    def test_kepler_vf_paths_never_touch_nvapi_even_with_cached_layout(self):
+        gpu = GPU.__new__(GPU)
+        gpu._lock = threading.RLock()
+        gpu.arch = Mock(return_value=GPU.ARCH_KEPLER)
+        gpu.nvapi = Mock(ok=True)
+        gpu._vfp_layout_cache = object()
+        self.assertFalse(gpu.vf_curve_applicable())
+        self.assertIsNone(gpu.vfp_layout())
+        self.assertIsNone(gpu.read_vf_curve()[0])
+        self.assertIsNone(gpu.read_vf_lock())
+        self.assertFalse(gpu.apply_vf_deltas({0: 15000})[0])
+        self.assertFalse(gpu.reset_vf_curve()[0])
+        self.assertFalse(gpu.set_vf_lock(1000000)[0])
+        self.assertFalse(gpu.clear_vf_lock()[0])
+        self.assertEqual(gpu.nvapi.mock_calls, [])
+
+    def test_other_architectures_still_require_runtime_vf_validation(self):
+        gpu = GPU.__new__(GPU)
+        for arch in (None, 3, 4, 6, 10):
+            gpu.arch = Mock(return_value=arch)
+            self.assertTrue(gpu.vf_curve_applicable())
+
+    def test_kepler_callbacks_do_not_read_write_or_access_absent_widgets(self):
+        from druta import Druta
+        app = Druta.__new__(Druta)
+        app.gpu = SimpleNamespace(vf_curve_applicable=lambda: False)
+        # No DPG context or editor state: a stale callback must return first.
+        for name in ('vf_read', 'vf_reset', 'vf_apply', 'vf_deflatten',
+                     'vf_ramp', 'vf_hard_deflatten', 'vf_rephase', 'oc_max'):
+            getattr(app, name)()
+        self.assertFalse(app.hold_for_read())
+        self.assertEqual(app.n_vf_rows(), 0)
+
+    def test_kepler_profiles_restore_without_a_curve(self):
+        import profiles
+        from test_tune_profiles import hardware
+        gpu, rail, calls = hardware()
+        gpu.vf_curve_applicable = lambda: False
+        state = profiles.capture(gpu, rail)
+        gpu.read_vf_curve.assert_not_called()
+        self.assertFalse(state['vf_applicable'])
+        self.assertEqual(profiles.incomplete(state), [])
+        results = profiles.restore(gpu, state, rail=rail, i2c_verified=True)
+        self.assertTrue(all(ok for ok, _ in results), results)
+        gpu.apply_vf_deltas.assert_not_called()
+        gpu.set_clock_offset.assert_called()
+        rail.set_offset_mv.assert_called_once()
+
+    def test_profile_vf_applicability_mismatch_refuses_before_any_write(self):
+        import profiles
+        from test_tune_profiles import hardware
+        gpu, _, calls = hardware()
+        for applicable, state in ((False, {'vf_deltas': {'0': 15000}}),
+                                  (True, {'vf_applicable': False})):
+            gpu.vf_curve_applicable = lambda: applicable
+            results = profiles.restore(gpu, state)
+            self.assertFalse(results[0][0])
+            self.assertEqual(calls, [])
+
     def test_max_without_curve_does_not_partially_apply(self):
         from druta import Druta
         app = Druta.__new__(Druta)
