@@ -24,10 +24,7 @@ this comparison does not establish a 472.12 Blackwell path.
 | Memory timing capture and writes | Board/tool dependent | Capture works; FAW 16→17 is dropped by hardware and reported as dropped | Capture, FAW 24→25 write, and exact restore confirmed |
 | MSVDD | Unavailable on these TITAN boards | Unavailable; no confirmed rail | Unavailable; no confirmed rail |
 
-Export presence or a successful write return alone is not a functional result.
-The owner confirms that the RTX is on a water loop, explaining its zero RPM
-readings on both drivers. Fan controls remain exposed: availability follows
-the confirmed control APIs, independently of the measured RPM. Manual targets
+Export presence or a successful write return alone is not a functional result. Manual targets
 and Auto policies were verified and restored on both fan channels.
 The [public validation summary](experiments/compatibility-validation-47212.json)
 records the integrated checks and measured outcomes without private paths,
