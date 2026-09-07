@@ -67,6 +67,8 @@ function Get-SourceSnapshot {
         'experiments/compatibility-validation-47212.json',
         'experiments/kepler-validation-47212.json',
         'experiments/maxwell-gtx745-validation-47212.json',
+        'experiments/maxwell-gtx745-timing-sweep-47212.json',
+        'experiments/maxwell-gtx745-timing-sweep-47212.md',
         'experiments/kepler-timing-writes-47212.json',
         'experiments/kepler-timing-sweep-47212.json',
         'experiments/kepler-ncp4206-identity-47212.json',

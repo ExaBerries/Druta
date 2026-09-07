@@ -24,7 +24,7 @@ column describes the TITAN boards; GTX 770 and GTX 745 were tested only on 472.1
 | NVML frequency lock | Works on Turing; unsupported on Pascal | Confirmed at 1500 MHz under load; legacy RM readback also sees another process's range | Unsupported baseline; V/F point lock remains available | GPU 1176..1176 MHz and memory 3505..3505 MHz both return Not Supported (3), while elevated | GPU 1072 MHz / memory 900 MHz locks return Not Supported; application-clock getters return 1032 / 900 MHz (setter untested) |
 | Profiles, Undo, Reset all and Max it | Existing composite actions | All 13 UI callback checks passed; exact controls/table/lock restoration | All 13 UI callback checks passed; exact controls/table/lock restoration | Profiles omit the inapplicable V/F table; Reset all skips curve writes; Max it hidden. Core/memory/fan and I2C restoration verified separately; default profile replay covered by hardware-free tests | Full profile replay restored +40 core, zero memory offset and manual 100% fan; no V/F requirement |
 | I2C regulator control | Board/tool dependent | MP2888A verified under load: +75 mV request moved rail-minus-VID by +45 mV; original raw value restored | No matching regulator found on this board | NCP4206 absolute target verified at 1250/1262.5 mV; Auto and profile restoration exact | No matching registered profile found; no voltage writes |
-| Memory timing capture and writes | Board/tool dependent | Capture works; FAW 16→17 is dropped by hardware and reported as dropped | Capture, FAW 24→25 write, and exact restore confirmed | Capture and 15 delay fields verified; exact restoration; CL 18→19 triggered driver recovery (details below) | P0 capture works; FAW 38→39 landed twice on both partitions and restored exactly; CL untested |
+| Memory timing capture and writes | Board/tool dependent | Capture works; FAW 16→17 is dropped by hardware and reported as dropped | Capture, FAW 24→25 write, and exact restore confirmed | Capture and 15 delay fields verified; exact restoration; CL 18→19 triggered driver recovery (details below) | All 33 timing fields queried; 16 delay fields accepted +1 and restored across both partitions; CL queried only; zero-value restore caveat below |
 | MSVDD | Unavailable on these TITAN boards | Unavailable; no confirmed rail | Unavailable; no confirmed rail | No confirmed rail | No confirmed rail |
 
 Export presence or a successful write return alone is not a functional result. Manual targets
@@ -42,6 +42,8 @@ observed temperature in the ordinary-control checks was 30 °C. Original
 +40 MHz core offset, zero memory offset, manual 100% fan, and timing registers
 were restored. These short checks do not establish maximum clocks or stability.
 No voltage or CAS-latency writes were made. Windows sign-in replay is untested.
+
+The subsequent [full timing query and bounded sweep](experiments/maxwell-gtx745-timing-sweep-47212.md) verified 16 writable delay fields and exact final restoration with 270 checked transfers. CCDL/CCDS start at zero; nvtune warns on restoring zero despite allowing a +1 test. CCDL restored on a P-state transition; CCDS used an exact-original restoration override. Latency/preamble/protocol, structural/split, inferred and warning-producing fields remain query-only.
 
 ## Ordinary clock offsets
 
