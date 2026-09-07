@@ -66,6 +66,7 @@ function Get-SourceSnapshot {
         'experiments/legacy-frequency-production-47212.json',
         'experiments/compatibility-validation-47212.json',
         'experiments/kepler-validation-47212.json',
+        'experiments/maxwell-gtx745-validation-47212.json',
         'experiments/kepler-timing-writes-47212.json',
         'experiments/kepler-timing-sweep-47212.json',
         'experiments/kepler-ncp4206-identity-47212.json',

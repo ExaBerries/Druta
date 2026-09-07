@@ -2424,7 +2424,8 @@ class Druta:
         fan_caps = self.gpu.fan_capabilities()
         fan_manual = fan_caps["manual"]
         fan_auto = fan_caps["auto"]
-        frequency_lock = self.gpu.arch() not in (GPU.ARCH_KEPLER, GPU.ARCH_PASCAL)
+        frequency_lock = (self.gpu.arch() not in (GPU.ARCH_KEPLER, GPU.ARCH_PASCAL)
+                          and not getattr(self.gpu, "is_gtx745", lambda: False)())
         for tag in self._ctl_widgets:
             if dpg.does_item_exist(tag):
                 available = (fan_manual if tag in ("sl_fan", "in_fan", "go_fan")
@@ -5842,6 +5843,8 @@ deliberately does not put behind a button."""
                 dpg.add_text("GPU CLOCK LOCK", color=ACCENT)
                 if self.gpu.arch() == GPU.ARCH_KEPLER:
                     dpg.add_text("NVML GPU and memory clock locks are unavailable on Kepler.", color=DIM)
+                elif self.gpu.is_gtx745():
+                    dpg.add_text("NVML GPU and memory clock locks are unavailable on GTX 745.", color=DIM)
                 elif self.gpu.arch() == GPU.ARCH_PASCAL:
                     dpg.add_text("NVML frequency locking is unavailable on Pascal.\n"
                                  "Use Ctrl+H on the V/F curve to hold a point.", color=DIM)

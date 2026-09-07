@@ -289,7 +289,7 @@ def preflight(gpu, state, rail=None):
     if state.get("vf_applicable") is False and vf_applicable(gpu):
         return "this GPU requires a V/F snapshot; save a fresh profile on this card"
     if state.get("vf_deltas") and not vf_applicable(gpu):
-        return "V/F curve profiles cannot be applied to Kepler"
+        return "V/F curve profiles cannot be applied to this GPU"
     limits = state.get("rail_limits_mv") or {}
     offsets = state.get("clock_domain_offsets_mhz") or {}
     i2c = state.get("i2c")

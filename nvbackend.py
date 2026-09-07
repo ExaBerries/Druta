@@ -1155,6 +1155,9 @@ class _FieldValue(ctypes.Structure):
 # byte-for-byte what GPU-Z shows). Only positively identified types are scaled;
 # an unknown id is displayed raw rather than risking a wrong number.
 MEM_TYPES = {
+    # GTX 745 DDR3: RAM type 7; 900 MHz reported = 1.8 Gbps data rate.
+    # A +20-unit Pstates20 request moved the physical clock by +10 MHz.
+    7:  ("DDR3", 1),
     8:  ("GDDR5", 2),
     10: ("GDDR5X", 4),
     14: ("GDDR6", 4),
@@ -2424,6 +2427,7 @@ class GPU:
     # NVML's own architecture enum. Kepler 2, Maxwell 3, Pascal 4, Volta 5,
     # Turing 6, Ampere 7, Ada 8, Hopper 9, Blackwell 10.
     ARCH_KEPLER = 2
+    ARCH_MAXWELL = 3
     ARCH_PASCAL = 4
     ARCH_TURING = 6
     ARCH_NAMES = {2: "Kepler", 3: "Maxwell", 4: "Pascal", 5: "Volta",
@@ -2443,13 +2447,19 @@ class GPU:
     def arch_name(self):
         return self.ARCH_NAMES.get(self.arch() or -1)
 
+    def is_gtx745(self):
+        """The GM107 board tested on R472; not a blanket Maxwell capability."""
+        api = getattr(self, "nvapi", None)
+        return (self.arch() == self.ARCH_MAXWELL
+                and (getattr(api, "selected", None) or {}).get("devid") == 0x1382)
+
     def vf_curve_applicable(self):
-        """Kepler uses ordinary clock offsets, not this V/F table mechanism.
+        """Kepler and the GTX 745 use ordinary clock offsets, not this V/F table.
 
         Other architectures retain their existing runtime layout validation;
         an unavailable read must not be mistaken for an inapplicable curve.
         """
-        return self.arch() != self.ARCH_KEPLER
+        return self.arch() != self.ARCH_KEPLER and not self.is_gtx745()
 
     # WHAT WAS ACTUALLY MEASURED, per (architecture, control domain). Absent
     # means nobody has looked, and absent must not be read as either answer.
@@ -2557,7 +2567,8 @@ class GPU:
         # GK104 accepts this getter and echoes zero-filled Turing-shaped
         # records. Neither the field meanings nor voltage response have been
         # established on Kepler; successful GET alone cannot authorize SET.
-        if self.arch() == 2:
+        # GM107 GTX 745 exhibits the same unvalidated Turing-shaped response.
+        if self.arch() == self.ARCH_KEPLER or self.is_gtx745():
             return None
         cached = getattr(self, "_clkdom_layout_cache", None)
         if cached is not None:
@@ -4738,7 +4749,7 @@ class GPU:
         """Return (points, err). points = list of dicts sorted by curve index:
         {idx, volt_mv, freq_mhz (evaluated, includes current deltas), delta_khz}."""
         if not self.vf_curve_applicable():
-            return None, "V/F curves are not applicable on Kepler"
+            return None, "V/F curves are not applicable on this GPU"
         a = self.nvapi
         if not (a.ok and a.VfpCurve and a.BoostTableGet):
             return None, "VF curve APIs unavailable"
@@ -5569,7 +5580,7 @@ class GPU:
         against accidental user mouse slip or other sorts of garbage (|delta| <= 1 GHz), so legitimate de-flatten compounding
         and deliberate editor moves are never blocked."""
         if not self.vf_curve_applicable():
-            return False, "V/F curves are not applicable on Kepler"
+            return False, "V/F curves are not applicable on this GPU"
         a = self.nvapi
         if not (a.ok and a.BoostTableGet and a.BoostTableSet):
             return False, "boost-table APIs unavailable"
