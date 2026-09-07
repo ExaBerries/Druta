@@ -63,7 +63,7 @@ class RailIdentityTests(unittest.TestCase):
                 self.assertIsNone(railctl.find(self.nvapi, log=log, **kwargs))
                 self.ncp.assert_not_called()
                 self.rail.assert_not_called()
-                self.profiles.assert_not_called()
+                self.profiles.assert_called()  # MP discovery bypasses board IDs
                 self.assertFalse(log.call_args.args[1])
 
     def test_explicit_identity_can_fill_missing_selected_fields(self):

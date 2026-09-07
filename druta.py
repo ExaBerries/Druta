@@ -301,6 +301,7 @@ class Druta:
         # board, and a cached pass from last week is exactly the claim that
         # would survive a link coming off.
         self._i2c_verified = False
+        self._i2c_verified_for = None
         self._i2c_busy = False
         # The regulator this card actually has, or None. Discovered by an
         # identity read on the bus rather than by card name, so it is a
@@ -488,6 +489,9 @@ class Druta:
             return False
         if getattr(self, "_profile_pending", None):
             self.log("profile load is waiting for I2C verification", False)
+            return False
+        if getattr(self, "_i2c_busy", False):
+            self.log("wait for I2C verification and restoration to finish", False)
             return False
         if not self.unlocked():
             self.log("locked - tick 'Unlock controls' first", False)
@@ -1402,6 +1406,11 @@ class Druta:
         """
         if getattr(self, "_profile_pending", None):
             return
+        if key == "i2crail" and getattr(self.rail, "requires_verification", False):
+            if self.guard():
+                self.report(self.reset_i2c_rail())
+                self.sync_profile_rail_sliders()
+            return
         if key == "i2crail" and getattr(self.rail, "absolute_voltage", False):
             if self.guard() and self.i2c_gate()[0]:
                 self.autosave_before("i2c-voltage-auto")
@@ -2174,46 +2183,11 @@ class Druta:
                                 # something real - it is a field that does nothing while
                                 # looking like a voltage control. Use the MSVDD rail limits
                                 # below.
-                                # THE OTHER ROAD TO THE SAME RAIL, and the only knob in
-                                # Druta with no firmware underneath it. Built only where a
-                                # regulator actually answered, so an unmodified card shows
-                                # no dead row - the same rule the per-domain knobs use.
-                                if self.rail is not None and self.rail.present():
-                                    rp = self.rail.p
-                                    tel = self.rail.telemetry()
-                                    # PMBus straight to the regulator. The knob above ASKS
-                                    # the GPU for volts and the firmware may refuse; this
-                                    # one moves the regulator and nothing can refuse it.
-                                    # The GPU never learns the rail changed, so it will not
-                                    # compensate, will not throttle for it, and its own
-                                    # voltage readout stays wrong by however much you dial
-                                    # in. IT DOES NOT CLEAR ON REBOOT - only 'Reset all to
-                                    # stock' or pulling 12 V. Press Verify first: it climbs
-                                    # 6.25 -> 75 mV under load until the rail is SEEN to
-                                    # move, and Apply stays refused until it has. Measured
-                                    # on this card: the first ~31 mV up and ~12 mV down do
-                                    # nothing at all, then it tracks about 1:1 - so read
-                                    # the measured column, never the number you set.
-                                    # Label from the profile, not hardcoded: the rail this
-                                    # drives is whatever the identified board says it is.
-                                    self.slider_row(
-                                        "i2crail", (f"{rp.rail} voltage target (mV)" if getattr(self.rail, "absolute_voltage", False)
-                                                    else f"{rp.rail} at the VRM (mV)"),
-                                        int(rp.env_min), int(rp.env_max),
-                                        int((tel.get("target_mv") or tel.get("vout_mv") or rp.env_min)
-                                            if getattr(self.rail, "absolute_voltage", False) else (tel.get("offset_mv") or 0)),
-                                        self.apply_i2c_rail,
-                                        extra=[("Verify", self.verify_i2c_rail),
-                                               ("Auto" if getattr(self.rail, "absolute_voltage", False) else "Stock",
-                                                lambda: self.stock_knob("i2crail"))],
-                                        color=BAD,
-                                        # The register's own representable range, not a
-                                        # policy: past it the field wraps through its sign
-                                        # bit. railctl refuses there in every mode, so the
-                                        # slider stops in the same place rather than
-                                        # offering travel that can only be rejected.
-                                        xoc_lo=int(rp.hw_min_mv),
-                                        xoc_hi=int(rp.hw_max_mv))
+            if railctl is not None:
+                with dpg.collapsing_header(label="I2C regulator",
+                                           default_open=bool(getattr(self, "_rail_candidates", []))):
+                    with dpg.group(tag="i2c_candidates"):
+                        self.build_i2c_candidates()
 
             if self.vf_applicable():
                 with dpg.collapsing_header(label="V/F curve editor",
@@ -2538,27 +2512,151 @@ class Druta:
         except Exception:                                       # noqa: BLE001
             return None
         if v is None:
+            self.invalidate_i2c_verification()
             return None
         if not vc:
             return f"{v:.0f} mV"
         return f"{v:.0f} mV  ({v - vc:+.0f} vs GPU)"
 
     # ---- the I2C rail: verify before you are allowed to drive it ----------- #
-    def find_rail(self):
-        """Identify this card's regulator from the shipped/user profiles.
+    def invalidate_i2c_verification(self):
+        self._i2c_verified = False
+        self._i2c_verified_for = None
 
-        Called on startup and on every card swap. Failure is normal and silent
-        in the UI - most boards do not route the regulator to the GPU bus, and
-        the honest result there is simply no row on the Control tab.
-        """
+    def i2c_connection(self):
+        if self.rail is None:
+            return None
+        identity = profiles.rail_identity(self.rail)
+        return (id(self.gpu), id(self.rail), getattr(self, "_gpu_gen", 0),
+                tuple(sorted(identity.items())))
+
+    def i2c_verified(self):
+        return (bool(self._i2c_verified)
+                and getattr(self, "_i2c_verified_for", None) is not None
+                and self._i2c_verified_for == self.i2c_connection())
+
+    def find_rail(self):
+        """Discover all controllers; only auto-select an unambiguous result."""
         self.rail = None
+        self._i2c_recovery_for = None
+        self._rail_candidates = []
+        self.invalidate_i2c_verification()
         if railctl is None:
             return
         try:
-            self.rail = railctl.find(self.gpu.nvapi, log=self.log,
-                                     architecture=self.gpu.arch())
-        except Exception as e:                                  # noqa: BLE001
-            self.log(f"i2c profile scan failed: {type(e).__name__}: {e}", False)
+            self._rail_candidates = railctl.discover(
+                self.gpu.nvapi, log=self.log, architecture=self.gpu.arch())
+            if len(self._rail_candidates) == 1:
+                self.rail = self._rail_candidates[0]
+        except Exception as e:
+            self.log(f"i2c scan failed: {type(e).__name__}: {e}", False)
+
+    def i2c_candidate_label(self, rail):
+        candidates = getattr(self, "_rail_candidates", [])
+        index = next((i + 1 for i, r in enumerate(candidates) if r is rail), 0)
+        return f"{index}: {rail.p.regulator} - port {rail.p.port}, 0x{rail.addr7:02X}"
+
+
+    def build_i2c_candidates(self):
+        """Only rebuild the regulator controls, preserving other staged edits."""
+        candidates = getattr(self, "_rail_candidates", [])
+        labels = [self.i2c_candidate_label(r) for r in candidates]
+        selected = self.i2c_candidate_label(self.rail) if self.rail else "Select controller"
+        dpg.add_combo(labels, default_value=selected, width=-1,
+                      tag="i2c_candidate", callback=self.select_i2c_candidate)
+        dpg.add_button(label="Rescan I2C", callback=self.rescan_i2c)
+        for r in candidates:
+            tel = getattr(r, "discovery_telemetry", {})
+            details = []
+            for key, unit in (("vout_mv", "mV"), ("iout_a", "A"), ("vrm_temp_c", "C")):
+                value = tel.get(key)
+                if value is not None:
+                    details.append(f"{value:.1f} {unit}")
+            if details:
+                dpg.add_text(self.i2c_candidate_label(r) + " - " + ", ".join(details), color=DIM)
+        if self.rail is None:
+            dpg.add_text("Select a controller, then Verify its response under load." if candidates
+                         else "No compatible controller responded to the scan.", color=WARN)
+            return
+        dpg.add_text(self.rail.p.name, color=DIM)
+        if not self.rail.present():
+            self.invalidate_i2c_verification()
+            dpg.add_text("Controller no longer responds; rescan I2C.", color=WARN)
+            return
+        rp = self.rail.p
+        if rp.read_only:
+            dpg.add_text("Read-only profile; voltage adjustment is unavailable.", color=DIM)
+            return
+        tel = self.rail.telemetry()
+        absolute = getattr(self.rail, "absolute_voltage", False)
+        with dpg.table(header_row=False, no_host_extendX=True,
+                       policy=dpg.mvTable_SizingFixedFit):
+            self.knob_cols()
+            self.slider_row(
+                "i2crail", (f"{rp.rail} voltage target (mV)" if absolute
+                            else f"{rp.rail} offset at VRM (mV)"),
+                int(rp.env_min), int(rp.env_max),
+                int((tel.get("target_mv") or tel.get("vout_mv") or rp.env_min)
+                    if absolute else (tel.get("offset_mv") or 0)),
+                self.apply_i2c_rail,
+                extra=[("Verify", self.verify_i2c_rail),
+                       ("Auto" if absolute else "Stock", lambda: self.stock_knob("i2crail"))],
+                color=BAD, xoc_lo=int(rp.hw_min_mv), xoc_hi=int(rp.hw_max_mv))
+
+    def refresh_i2c_candidates(self):
+        if not dpg.does_item_exist("i2c_candidates"):
+            return
+        self._ctl_widgets = [t for t in self._ctl_widgets if "i2crail" not in str(t)]
+        self._slider_ranges.pop("i2crail", None)
+        self._knob_cb.pop("i2crail", None)
+        getattr(self, "_carryover_hi", {}).pop("i2crail", None)
+        dpg.delete_item("i2c_candidates", children_only=True)
+        with dpg.group(parent="i2c_candidates"):
+            self.build_i2c_candidates()
+        self.sync_lock_ui()
+        self.sync_risk_ui()
+        self.relayout()
+
+    def select_i2c_candidate(self, sender=None, app_data=None, user_data=None):
+        if (getattr(self, "_i2c_busy", False)
+                or getattr(self, "_profile_pending", None)
+                or getattr(self, "_profile_applying", False)):
+            self.log("wait for I2C/profile work to finish before selecting a controller", False)
+            if dpg.does_item_exist("i2c_candidate"):
+                dpg.set_value("i2c_candidate", self.i2c_candidate_label(self.rail)
+                              if self.rail else "Select controller")
+            return False
+        chosen = next((r for r in self._rail_candidates
+                       if self.i2c_candidate_label(r) == app_data), None)
+        if chosen is None or chosen is self.rail:
+            return False
+        self.invalidate_i2c_verification()
+        self._i2c_recovery_for = None
+        self.rail = chosen
+        self.refresh_i2c_candidates()
+        self.log("I2C controller selected; press Verify before applying an adjustment", True)
+        return True
+
+    def rescan_i2c(self):
+        if (getattr(self, "_i2c_busy", False)
+                or getattr(self, "_profile_pending", None)
+                or getattr(self, "_profile_applying", False)):
+            self.log("wait for I2C/profile work to finish before rescanning", False)
+            return False
+        self.find_rail()
+        self.refresh_i2c_candidates()
+        return True
+
+    def reset_i2c_rail(self):
+        """Allow recovery of a tried connection, never probe an untouched one."""
+        if getattr(self, "_i2c_busy", False):
+            return False, "wait for verification and restoration to finish"
+        if getattr(self.rail, "requires_verification", False):
+            if not (self.i2c_verified()
+                    or (getattr(self, "_i2c_recovery_for", None) is not None
+                        and self._i2c_recovery_for == self.i2c_connection())):
+                return False, "MP2888A candidate has not been verified; no reset write issued"
+        return self.rail.reset()
 
     def i2c_gate(self):
         """(ok, why) for touching the regulator at all."""
@@ -2573,6 +2671,7 @@ class Druta:
                            "gets - it must not be possible to write here "
                            "without having seen it")
         if not self.rail.present():
+            self.invalidate_i2c_verification()
             return False, (f"the {self.rail.p.regulator} that identified at "
                            f"0x{self.rail.addr7:02X} is no longer answering - "
                            f"something moved on the bus, or a link came off")
@@ -2601,7 +2700,7 @@ class Druta:
             self.log("verify: " + msg, False)
             return
         self._i2c_busy = True
-        self._i2c_verified = False
+        self.invalidate_i2c_verification()
         self.log("verifying the rail write path under load - the card will be "
                  "busy for a few seconds and the offset is restored after", None)
         threading.Thread(target=self._i2c_verify_worker, daemon=True,
@@ -2611,6 +2710,9 @@ class Druta:
         # Bound to the Rail captured at start, so a card swap mid-run cannot
         # redirect the restore write at a different board's bus.
         gpu, rail, res = self.gpu, self.rail, {}
+        connection = self.i2c_connection()
+        self.invalidate_i2c_verification()
+        rail._verification_write_attempted = False
         try:
             def staircase():
                 return rail.verify(acknowledged=True,
@@ -2621,6 +2723,9 @@ class Druta:
             res["v"] = out.get("result")
         except Exception as e:                                  # noqa: BLE001
             res["err"] = f"{type(e).__name__}: {e}"
+        if (getattr(rail, "_verification_write_attempted", False)
+                and connection == self.i2c_connection()):
+            self._i2c_recovery_for = connection
         v = res.get("v")
         if v is None:
             self.log("verify: the load never settled, so nothing was measured"
@@ -2628,7 +2733,13 @@ class Druta:
             self._i2c_busy = False
             return
         ok, msg, _ladder = v
-        self._i2c_verified = bool(ok) and self.gpu is gpu and self.rail is rail
+        if connection != self.i2c_connection():
+            msg += "; controller connection changed; Verify again"
+        ok = bool(ok) and not res.get("err") and connection == self.i2c_connection()
+        self._i2c_verified = ok
+        self._i2c_verified_for = connection if ok else None
+        if res.get("err"):
+            msg += f"; load validation failed: {res['err']}"
         self.log("verify: " + msg, ok)
         self._i2c_busy = False  # publish completion AFTER the result
 
@@ -2644,7 +2755,7 @@ class Druta:
         if not ok:
             self.log("rail: " + why, False)
             return
-        if not self._i2c_verified:
+        if not self.i2c_verified():
             self.log("rail: press Verify first. Until the staircase has been "
                      "watched moving this card's rail, a write here is a write "
                      "into a path nobody has confirmed reaches anything - and "
@@ -3156,7 +3267,7 @@ class Druta:
         offsets, voltage boost, power limit, fan and every delta - and
         unlike Apply there is no single thing on screen whose consequence a
         banner could state, because it undoes every knob on the tab."""
-        if getattr(self, "_profile_pending", None):
+        if getattr(self, "_profile_pending", None) or getattr(self, "_i2c_busy", False):
             self.log("wait for I2C/profile loading to finish before resetting", False)
             return
         if not self._reset_armed:
@@ -3227,7 +3338,7 @@ class Druta:
         # rather than being folded into the general success count - somebody
         # reading the log needs to see that this specific undo happened.
         if self.rail is not None and dpg.does_item_exist("sl_i2crail"):
-            ok, m = self.rail.reset()
+            ok, m = self.reset_i2c_rail()
             self.log("VRM rail offset: " + m, ok)
             failed += (0 if ok else 1)
             if ok:
@@ -5610,6 +5721,16 @@ deliberately does not put behind a button."""
             dpg.configure_item("win_profiles", show=True)
             dpg.focus_item("win_profiles")
 
+    def rail_for_profile(self, state):
+        """A saved exact connection can disambiguate discovery without a write."""
+        saved = state.get("i2c")
+        if not isinstance(saved, dict) or not saved:
+            return self.rail
+        candidates = getattr(self, "_rail_candidates", [self.rail] if self.rail else [])
+        matching = [r for r in candidates
+                    if all(saved.get(k) == v for k, v in profiles.rail_identity(r).items())]
+        return matching[0] if len(matching) == 1 else None
+
     def load_profile(self, name):
         """Restoring is a destructive write like any other, so it goes through
         the unlock gate, takes its own undo point first, and reports every knob
@@ -5621,7 +5742,7 @@ deliberately does not put behind a button."""
         except Exception as e:
             self.log(f"load '{name}': {e}", False)
             return
-        error = profiles.preflight(self.gpu, state, self.rail)
+        error = profiles.preflight(self.gpu, state, self.rail_for_profile(state))
         if error:
             self.profile_failure(error)
             return
@@ -5638,7 +5759,7 @@ deliberately does not put behind a button."""
         if not self.guard() or self._i2c_busy:
             self.profile_failure("profile load blocked by another operation or locked controls", automatic)
             return
-        error = profiles.preflight(self.gpu, state, self.rail)
+        error = profiles.preflight(self.gpu, state, self.rail_for_profile(state))
         if automatic:
             error = error or profiles.strict_device_error(state, self.gpu)
             if profiles.incomplete(state):
@@ -5646,6 +5767,12 @@ deliberately does not put behind a button."""
         if error:
             self.profile_failure(error, automatic)
             return
+        chosen = self.rail_for_profile(state)
+        if chosen is not self.rail:
+            self.invalidate_i2c_verification()
+            self._i2c_recovery_for = None
+            self.rail = chosen
+            self.refresh_i2c_candidates()
         # The action label is bounded: undoing an undo would otherwise compose
         # 'load-autosave-load-autosave-...' into a filename that only grows
         captured = self.autosave_before(f"load-{name}"[:40])
@@ -5660,9 +5787,9 @@ deliberately does not put behind a button."""
                                ("i2c_mode", bool(state.get("i2c")))):
                 dpg.set_value(tag, value)
             self.sync_risk_ui()
-        if state.get("i2c") and not self._i2c_verified:
+        if state.get("i2c") and not self.i2c_verified():
             self.verify_i2c_rail()
-            if not self._i2c_busy and not self._i2c_verified:
+            if not self._i2c_busy and not self.i2c_verified():
                 self.profile_failure("I2C verification could not start", automatic)
                 return
             self._profile_pending = (name, state, automatic)
@@ -5682,7 +5809,7 @@ deliberately does not put behind a button."""
         for tag in ("unlock", "xoc_mode", "i2c_mode", "vlim_mode"):
             dpg.configure_item(tag, enabled=True)
         name, state, automatic = pending
-        if not self._i2c_verified:
+        if not self.i2c_verified():
             self.profile_failure("I2C verification failed; profile was not applied", automatic)
             return
         self.finish_profile_load(name, state, automatic)
@@ -5698,7 +5825,7 @@ deliberately does not put behind a button."""
         self._profile_applying = True
         try:
             results = profiles.restore(self.gpu, state, rail=self.rail,
-                                       i2c_verified=self._i2c_verified)
+                                       i2c_verified=self.i2c_verified())
         except Exception as e:
             results = [(False, f"profile restore failed: {e}")]
         finally:
@@ -5748,7 +5875,7 @@ deliberately does not put behind a button."""
             if manager is None:
                 raise ValueError("startup manager is unavailable")
             state = profiles.load(name)
-            error = profiles.preflight(self.gpu, state, self.rail)
+            error = profiles.preflight(self.gpu, state, self.rail_for_profile(state))
             error = error or profiles.strict_device_error(state, self.gpu)
             if error:
                 raise ValueError(error)

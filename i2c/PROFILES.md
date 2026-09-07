@@ -20,12 +20,36 @@ Its command/mode capture participates in tuning profiles and Undo. Normal and
 XOC request ceilings are 1281 and 2000 mV; the VID encoding still refuses above
 1600 mV. Other NCP4206 boards require their own identity and response checks.
 
+MP2888A discovery uses `mp2888.py` with the TOML as its register recipe. It
+scans ports 0–7 and ordinary unicast addresses 0x08–0x77, starting at 0x20,
+without PCI-device or subsystem filtering. The address register is checked
+against the responding address, alongside documented register bit patterns and
+repeated telemetry reads. This is a compatibility fingerprint, not a unique
+model ID. All candidates appear in the I2C regulator selector with their port,
+address and scan-time telemetry; multiple results require an explicit choice.
+
+Verify tests the selected candidate under load and restores the entry offset.
+Apply requires a successful response **and** successful restoration. Rescanning,
+selecting another controller, a card switch, or observed connection loss clears
+verification. Reset/Stock cannot make a first write to an untouched MP candidate;
+recovery remains available on the connection where a verification write or
+restoration was attempted. A load failure before that point grants no writes.
+
+The MP current report is low 12 bits times 0.25 A or 0.5 A, selected by register
+0x44 bit 3; it is not LINEAR11. The runtime adapter corrects this legacy TOML
+encoding while keeping old saved-profile fingerprints compatible at the original
+port/address. Other locations are pinned in the saved recipe and require their
+own verification. A saved profile can select exactly one matching recorded
+controller from multiple candidates; it must still pass fresh verification. Sources: [MPS datasheet, pp.30,43,71–72,86](https://www.monolithicpower.com/en/documentview/productdocument/index/version/2/document_type/Datasheet/lang/EN/sku/MP2888A)
+and [Linux MP2888 driver](https://kernel.googlesource.com/pub/scm/linux/kernel/git/axboe/linux/+/fc2ce3ee106f2d53eb344f5c4963c897bbb21634/drivers/hwmon/pmbus/mp2888.c).
+
 ---
 
 ## The three rules that shape everything else
 
-**1. A profile is matched by MEASUREMENT, not by name.** PCI IDs say which
-profiles are *candidates*. An identity read on the actual bus decides which one
+**1. A profile is matched by MEASUREMENT, not by name.** For ordinary TOML recipes, PCI IDs narrow the
+candidates. Built-in NCP4206 and MP2888A discovery use controller fingerprints
+without board-ID filters. An identity read on the actual bus decides which one
 is *used*. A profile with no working identity check can be loaded, but Druta
 marks it unconfirmed and keeps it read-only.
 

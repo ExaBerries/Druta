@@ -207,6 +207,7 @@ class ProfileFlow(unittest.TestCase):
         self.app.poll_profile_load()
         self.gpu.apply_vf_deltas.assert_not_called()
         self.app._i2c_busy, self.app._i2c_verified = False, True
+        self.app._i2c_verified_for = self.app.i2c_connection()
         self.app.poll_profile_load()
         self.gpu.apply_vf_deltas.assert_called_once()
         self.app._startup_manager.block.assert_not_called()

@@ -54,7 +54,7 @@ $sourceDir = Join-Path $bundleDir 'source'
 function Get-SourceSnapshot {
     $paths = @(
         'app.py', 'druta.py', 'nvbackend.py', 'gpuload.py', 'profiles.py', 'startup.py',
-        'railctl.py', 'ncp4206.py', 'shuntmod.py', 'timings.py', 'timingwrite.py',
+        'railctl.py', 'ncp4206.py', 'mp2888.py', 'shuntmod.py', 'timings.py', 'timingwrite.py',
         'Druta.spec', 'build.ps1', 'requirements.txt',
         'AGENTS.md', 'COPYING', 'THIRD-PARTY-NOTICES.md', 'README.md', 'MANUAL.md',
         'TECHNICALDOCUMENTATION.md', 'DEBUG-SUMMARY-RTX5080.md',
@@ -69,6 +69,7 @@ function Get-SourceSnapshot {
         'experiments/kepler-gtx690-validation-47212.json',
         'experiments/kepler-gtx690-timing-sweep-47212.json',
         'experiments/kepler-gtx690-i2c-47212.md',
+        'experiments/mp2888a-discovery-47212.json',
         'experiments/maxwell-gtx745-validation-47212.json',
         'experiments/maxwell-gtx745-p0-paths-47212.json',
         'experiments/maxwell-gtx745-p0-fan-ui-47212.json',

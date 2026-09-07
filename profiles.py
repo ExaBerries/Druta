@@ -248,7 +248,8 @@ def capture_rails(gpu, state, rail):
                 offset = rail.telemetry().get("offset_mv")
                 if offset is None:
                     raise ValueError("offset read failed")
-                state["i2c"] = dict(rail_identity(rail), offset_mv=offset)
+                state["i2c"] = dict(rail_identity(rail), offset_mv=offset,
+                                    display_name=rail.p.name)
         except Exception as e:
             missing.append(f"I2C offset NOT captured ({e})")
     # Unticking XOC does not undo above-normal values already in the card.

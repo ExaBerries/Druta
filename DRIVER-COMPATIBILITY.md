@@ -18,7 +18,7 @@ column describes the TITAN boards; GTX 770, GTX 745 and GTX 690 were tested only
 | V/F point lock | Confirmed | Confirmed during loaded offset checks; exact lock restored | Confirmed during loaded offset checks; exact lock restored | Unavailable through the current V/F path | No supported V/F table at idle or P0; suppressed | Inapplicable; V/F controls suppressed |
 | Fan duty, RPM, manual control and Auto | Confirmed | Both fan controls' requested levels and Auto policies verified through NVAPI; zero RPM is expected on this water-cooled card | Manual duty/RPM response and Auto verified through NVAPI cooler controls | Manual 50%, RPM response and exact Auto-policy restoration confirmed | Manual 90% request reads back; original manual 100% restored; RPM unavailable | 55/60/100% and Auto verified from either core; shared blower; readback takes about one second |
 | Clock event/performance-limit reasons | Confirmed | Legacy NVML ThrottleReasons fallback implemented | Legacy NVML ThrottleReasons fallback implemented | NVAPI performance-decrease reasons readable | NVML/NVAPI limit reasons readable | NVAPI performance-decrease and NVML event telemetry readable |
-| V/F curve editing and de-flatten planners | Confirmed | Negative-point write/reset and raised-cap de-flatten confirmed | Negative-point write/reset and raised-cap de-flatten confirmed; the regular ramp no longer treats the stock clock-list maximum as an overclock ceiling | Not applicable: editor, planners, point locks and shortcuts suppressed; switching back restores RTX’s 128 points | V/F editor/planners suppressed; yellow Lock P0 and max fan replaces Max it on the verified board; RTX returns with 128 points | Suppressed; switching back restores RTX 128 points; verified yellow P0/fan action replaces Max it |
+| V/F curve editing and de-flatten planners | Confirmed | Negative-point write/reset and raised-cap de-flatten confirmed | Negative-point write/reset and raised-cap de-flatten confirmed; the regular ramp no longer treats the stock clock-list maximum as an overclock ceiling | Not applicable: editor, planners, point locks and shortcuts suppressed; switching back restores RTX’s 128 points | Suppressed; yellow Lock P0 and max fan replaces Max it on the verified board; switching back to a GPU that has V/F curve would restore the curve | Suppressed; yellow Lock P0 and max fan replaces Max it on the verified board; switching back to a GPU that has V/F curve would restore the curve |
 | NVVDD rail offsets and all four limits | Confirmed; see voltage measurements below | Confirmed, including each live ceiling clamp and idle floor | Confirmed, including each live ceiling clamp; floor uses verified legacy re-send | Private layout unvalidated; controls blocked | Unvalidated private layout; writes blocked | Private layout unvalidated; controls blocked |
 | Per-domain clock offsets | Confirmed for mapped controls | XBAR, Additional Memory Clock Offset, SYS, VIDEO and LTC each moved by about +30 MHz under load | Additional Memory Clock Offset +25 MHz moved reported memory by +20.25 MHz twice; other paired controls remain hidden | Unvalidated; private controls hidden, including Additional Memory Clock Offset | No confirmed pairing; hidden | Private layout unvalidated; hidden |
 | Power limit and voltage boost | Confirmed | Confirmed with independent readback | Confirmed with independent readback | NVML power-limit range and voltage-boost getter unavailable; sliders hidden | Power-limit range and voltage-boost getter unavailable; sliders hidden | NVML watt limits and voltage-boost getter unsupported; sliders hidden |
@@ -108,7 +108,7 @@ unvalidated and hidden; the NCP4206 path is direct I2C control.
 The three-GPU review corrected stale telemetry after switching and moved UI
 callbacks onto the render thread so controls cannot be rebuilt concurrently
 with panel refresh. Kepler NCP4206 discovery scans the selected GPU's I2C ports
-without a PCI/subsystem whitelist; generic TOML profiles retain their matching rules.
+without a PCI/subsystem whitelist; other generic TOML profiles retain their matching rules; MP2888A also uses automatic controller discovery.
 Final test cleanup restored zero clock offsets, Auto fan policies and GPU VID control. These
 are bounded functional checks; Windows sign-in replay and long-term stability
 were not retested.
@@ -276,6 +276,32 @@ V/F hold. Its +75 mV request increased rail-minus-VID by 45 mV. Requests
 through +50 mV did not clear the probe's detection threshold; this is why
 the control reports measured response separately from its requested offset.
 The regulator's original raw offset of zero was restored and read back.
+
+### MP2888A automatic discovery
+
+The [2026-09-07 validation record](experiments/mp2888a-discovery-47212.json)
+covers read-only scans on all three installed GPUs. The TITAN RTX yielded one
+MP2888A candidate at port 1/address 0x20; both GTX 690 cores still yielded their
+NCP4206 at port 2/address 0x20, with no false MP candidate. Scan durations were
+0.4–1.8 seconds per GPU and no discovery writes occurred. MP discovery ignores
+DevID/subsystem filters and scans ports 0–7, addresses 0x08–0x77. Other addresses
+and multiple candidates are covered by transport mocks, not additional boards.
+
+The actual Verify button passed under CUDA load at GPU VID 1050 mV. The +75 mV
+trial moved rail-minus-VID by +44 mV against a 37.5 mV threshold. The original
+raw offset 0 was restored exactly; a subsequent +6.25 mV Apply stored raw 1,
+and Stock restored raw 0. Apply and Stock were both blocked before verification.
+This proves the write response on the tested controller, not universal board
+compatibility or a calibrated gain. Voltage limits were not raised in this run.
+
+The UI exposes all candidates by port/address and scan-time telemetry. Rescan
+clears verification while preserving staged V/F edits. Switching through both
+GTX 690 cores and back restores the TITAN RTX's 128-point curve. MP profile
+identity remains compatible at the original connection, while relocated profiles
+pin the discovered bus. Failed restoration now invalidates Verify, and Reset All
+cannot interrupt an active verification or make a first write to an untouched
+MP candidate. Current telemetry now uses the controller's direct encoding rather
+than the former LINEAR11 assumption; see [I2C profile documentation](i2c/PROFILES.md).
 
 ## Additional clock controls and card switching
 

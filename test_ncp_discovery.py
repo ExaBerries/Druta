@@ -118,7 +118,7 @@ class NcpDiscoveryTests(unittest.TestCase):
         self.ports = set()
         with patch("railctl.load_profiles") as generic:
             self.assertIsNone(railctl.find(self.nvapi, subsys=0, architecture=2))
-        generic.assert_not_called()
+        generic.assert_called_once()  # discover MP recipes independently of PCI IDs
 
 
 if __name__ == "__main__":

@@ -84,3 +84,12 @@ You should almost always use `Read memory timings (will hold P0)` (blue) because
 `Load nvtune` and `Enable Test Signing` are conspicuously displayed when nvtune isn't loaded.  
 
 Once `nvtune` EXE is loaded, these buttons move up to the `Device` menus on the taskbar. 
+
+## I2C controller selection
+
+MP2888A is discovered automatically by scanning the selected GPU's I2C ports
+and addresses. Open I2C regulator to see each candidate's port, address and
+scan-time telemetry. Choose a candidate when several respond, enable I2C rail,
+and press Verify before Apply. Rescan I2C refreshes discovery and clears the
+verification result; it preserves staged curve edits. Verification is repeated
+after changing GPUs or controllers, and cannot pass if restoration fails.
