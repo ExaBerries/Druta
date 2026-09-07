@@ -1108,7 +1108,6 @@
     "NVVDD/MSVDD private limits and offsets",
     "Additional Memory Clock Offset",
     "NVML power limit and voltage boost",
-    "I2C: device responds at NVAPI port 2 / address 0x20; no validated NCP4206 write profile",
     "Full profile/startup remains incomplete without a V/F table"
   ],
   "timing_write_verification": {
@@ -1122,5 +1121,6 @@
     "mismatches": 0,
     "scope": "FAW write path only; not all timing fields or long-term stability"
   },
-  "i2c_identity_evidence": "kepler-ncp4206-identity-47212.json"
+  "i2c_identity_evidence": "kepler-ncp4206-identity-47212.json",
+  "i2c_control_evidence": "kepler-ncp4206-control-47212.json"
 }

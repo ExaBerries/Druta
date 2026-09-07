@@ -1388,6 +1388,12 @@ class Druta:
         """
         if getattr(self, "_profile_pending", None):
             return
+        if key == "i2crail" and getattr(self.rail, "absolute_voltage", False):
+            if self.guard() and self.i2c_gate()[0]:
+                self.autosave_before("i2c-voltage-auto")
+                self.report(self.rail.reset())
+                self.sync_profile_rail_sliders()
+            return
         if key.startswith("vlim"):
             # ONE field on ONE rail. These share a block, and resetting the
             # block put the other rail back to stock along with it - pressing
@@ -2148,12 +2154,15 @@ class Druta:
                                     # Label from the profile, not hardcoded: the rail this
                                     # drives is whatever the identified board says it is.
                                     self.slider_row(
-                                        "i2crail", f"{rp.rail} at the VRM (mV)",
+                                        "i2crail", (f"{rp.rail} voltage target (mV)" if getattr(self.rail, "absolute_voltage", False)
+                                                    else f"{rp.rail} at the VRM (mV)"),
                                         int(rp.env_min), int(rp.env_max),
-                                        int(tel.get("offset_mv") or 0),
+                                        int((tel.get("target_mv") or tel.get("vout_mv") or rp.env_min)
+                                            if getattr(self.rail, "absolute_voltage", False) else (tel.get("offset_mv") or 0)),
                                         self.apply_i2c_rail,
                                         extra=[("Verify", self.verify_i2c_rail),
-                                               ("Stock", lambda: self.stock_knob("i2crail"))],
+                                               ("Auto" if getattr(self.rail, "absolute_voltage", False) else "Stock",
+                                                lambda: self.stock_knob("i2crail"))],
                                         color=BAD,
                                         # The register's own representable range, not a
                                         # policy: past it the field wraps through its sign
@@ -2262,11 +2271,15 @@ class Druta:
             def _fire(f):
                 return lambda: f()
 
-            for n, (lbl, xcb) in enumerate(extras):
-                tag = f"go_{key}_x" if n == 0 else f"go_{key}_x{n}"
-                dpg.add_button(label=lbl, tag=tag, width=-1,
-                               callback=_fire(xcb))
-                self._ctl_widgets.append(tag)
+            if extras:
+                # All extras share the sixth table cell. A seventh sibling
+                # was clipped, hiding the I2C Stock/Auto recovery button.
+                with dpg.group():
+                    for n, (lbl, xcb) in enumerate(extras):
+                        tag = f"go_{key}_x" if n == 0 else f"go_{key}_x{n}"
+                        dpg.add_button(label=lbl, tag=tag, width=-1,
+                                       callback=_fire(xcb))
+                        self._ctl_widgets.append(tag)
 
     # ---- slider <-> text box, and what either is allowed to reach ---------- #
     def knob_bounds(self, key):
@@ -2466,6 +2479,13 @@ class Druta:
         if self._i2c_busy:
             return "verifying"
         try:
+            if getattr(self.rail, "absolute_voltage", False):
+                tel = self.rail.telemetry()
+                measured = tel.get("vout_mv")
+                if measured is None:
+                    return None
+                return (f"Auto {measured:.0f}" if tel.get("target_mv") is None
+                        else f"{measured:.0f} mV")
             v = self.rail.read_vout()
         except Exception:                                       # noqa: BLE001
             return None
@@ -2587,7 +2607,10 @@ class Druta:
         if not okp:
             return
         self.autosave_before("i2c-rail-offset")
-        self.report(self.rail.set_offset_mv(float(v), acknowledged=True))
+        setter = (self.rail.set_voltage_mv if getattr(self.rail, "absolute_voltage", False)
+                  else self.rail.set_offset_mv)
+        self.report(setter(float(v), acknowledged=True))
+        self.sync_profile_rail_sliders()
 
     def apply_rail(self, v):
         # An undo point, like the core offset and unlike the other single
@@ -3049,9 +3072,11 @@ class Druta:
         st = self.gpu.static
         dpg.set_value("sl_core", 0)
         dpg.set_value("sl_mem", 0)
-        dpg.set_value("sl_pl", st.get("pl_def_mw", 260000) // 1000)
+        if dpg.does_item_exist("sl_pl"):
+            dpg.set_value("sl_pl", st.get("pl_def_mw", 260000) // 1000)
         vb = self.gpu.read_voltage_boost()
-        dpg.set_value("sl_volt", 0 if vb is None else max(0, min(100, vb)))
+        if dpg.does_item_exist("sl_volt"):
+            dpg.set_value("sl_volt", 0 if vb is None else max(0, min(100, vb)))
         dpg.set_value("sl_fan", st.get("fan_min", 30))
         # The per-domain offsets and the core rail ARE cleared on the card by
         # GPU.reset_all() above - but their sliders were never zeroed here, so
@@ -3075,7 +3100,10 @@ class Druta:
             self.log("VRM rail offset: " + m, ok)
             failed += (0 if ok else 1)
             if ok:
-                dpg.set_value("sl_i2crail", 0)
+                if getattr(self.rail, "absolute_voltage", False):
+                    self.sync_profile_rail_sliders()
+                else:
+                    dpg.set_value("sl_i2crail", 0)
         # None of the set_value calls above fires a slider callback, so the
         # typed-value boxes would keep showing the pre-reset numbers until the
         # next panel tick - on the one button whose whole point is that the
@@ -5551,7 +5579,10 @@ deliberately does not put behind a button."""
                 if knob.ctrl in (domains or {}):
                     values[knob.key] = domains[knob.ctrl]["freq_khz"] / 1000
             if self.rail:
-                values["i2crail"] = self.rail.telemetry().get("offset_mv")
+                tel = self.rail.telemetry()
+                values["i2crail"] = ((tel.get("target_mv") or tel.get("vout_mv"))
+                                     if getattr(self.rail, "absolute_voltage", False)
+                                     else tel.get("offset_mv"))
             for key, value in values.items():
                 if value is not None:
                     for prefix in ("sl_", "in_"):

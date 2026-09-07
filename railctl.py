@@ -813,6 +813,12 @@ def find(nvapi, dev_id=None, subsys=None, log=None):
     silently picking one of two descriptions of the same regulator is how a
     board ends up driven by the wrong bounds.
     """
+    from ncp4206 import NCP4206
+    ncp = NCP4206(nvapi)
+    if ncp.present():
+        if log:
+            log("i2c rail: NCP4206 absolute NVVDD control at 0x20/port 2", True)
+        return ncp
     hits = []
     for p in load_profiles(log=log):
         if not p.candidate_for(dev_id, subsys):

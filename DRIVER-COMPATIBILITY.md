@@ -22,7 +22,7 @@ column describes the TITAN boards; GTX 770 was tested only on 472.12.
 | Power limit and voltage boost | Confirmed | Confirmed with independent readback | Confirmed with independent readback | NVML power-limit range and voltage-boost getter unavailable; sliders hidden |
 | NVML frequency lock | Works on Turing; unsupported on Pascal | Confirmed at 1500 MHz under load; legacy RM readback also sees another process's range | Unsupported baseline; V/F point lock remains available | GPU 1176..1176 MHz and memory 3505..3505 MHz both return Not Supported (3), while elevated |
 | Profiles, Undo, Reset all and Max it | Existing composite actions | All 13 UI callback checks passed; exact controls/table/lock restoration | All 13 UI callback checks passed; exact controls/table/lock restoration | Core/memory/fan profile restore verified with apply_curve=False; full profile incomplete; Max it refuses before writes without a curve |
-| I2C regulator control | Board/tool dependent | MP2888A verified under load: +75 mV request moved rail-minus-VID by +45 mV; original raw value restored | No matching regulator found on this board | 0x20 on NVAPI port 2 responds with manufacturer 0x41; NCP4206 candidate, no validated write profile yet |
+| I2C regulator control | Board/tool dependent | MP2888A verified under load: +75 mV request moved rail-minus-VID by +45 mV; original raw value restored | No matching regulator found on this board | NCP4206 absolute target verified at 1250/1262.5 mV; Auto and profile restoration exact |
 | Memory timing capture and writes | Board/tool dependent | Capture works; FAW 16→17 is dropped by hardware and reported as dropped | Capture, FAW 24→25 write, and exact restore confirmed | Capture and 15 delay fields verified; exact restoration; CL 18→19 triggered driver recovery (details below) |
 | MSVDD | Unavailable on these TITAN boards | Unavailable; no confirmed rail | Unavailable; no confirmed rail | No confirmed rail |
 
@@ -170,7 +170,8 @@ If the new GPU cannot initialize, the previous curve and edits remain intact.
 
 
 GTX 770 switching likewise clears its unavailable curve and restores all 128
-RTX points on return. No private Kepler clock or voltage write was attempted.
+RTX points on return. No private NVAPI Kepler clock or rail write was attempted; the separately
+validated I2C voltage path is described below.
 
 ## Memory timing write results
 
@@ -219,9 +220,33 @@ at that address. This confirms an accessible I2C device consistent with the
 reported controller family. The manufacturer ID matches the
 [onsemi NCP4206 datasheet](https://www.onsemi.com/download/data-sheet/pdf/ncp4206-d.pdf),
 Table 11; the observed model/revision differ from its default 0x0208/0x03,
-so the exact variant/identity needs resolving before declaring a write profile.
+so Druta matches the measured PCI/subsystem and full observed identity tuple
+rather than treating the manufacturer byte as sufficient.
 
 The previous "no matching regulator profile" observation meant Druta shipped
 no matching recipe; it did not establish that this card lacked I2C support.
-Only identity registers were read in this follow-up. NCP4206 voltage writes,
-telemetry conversion, limits and restoration are not yet validated in Druta.
+Subsequent bounded writes validated the absolute voltage path on this board.
+`ncp4206.py` writes VOUT_COMMAND (0x21, two bytes) before enabling bit 3 in
+both VR Config registers (0xD2/0xD3); other bits and VOUT_CAL remain intact.
+Auto clears both VID_EN bits before clearing the inactive command. Profiles
+save the target command and Auto/manual mode, not a fictitious voltage offset.
+Failure during a write attempts restoration of the captured command and mode.
+
+The UI exposes 600..1281 mV in normal mode and 600..2000 mV in XOC, as
+requested. The VR11 command itself represents only 375..1600 mV: requests
+outside that encoding are rejected even in XOC, never wrapped or silently
+clamped. Targets snap down to the 6.25 mV grid (1281 requests 1275 mV).
+XOC expands a software envelope; it does not establish a 2 V hardware path.
+
+Live checks stayed below the owner's 1350 mV test limit: 1250 and 1262.5 mV
+requests read 1248.05 and 1263.67 mV through VMON (0xD7, measured LINEAR11
+volts on this board). Verify uses a bounded +25 mV step under load and restores
+the prior mode. UI Apply/Auto and profile round trips restored 0x21/0xD2/0xD3
+exactly; 0xDD remained 3. Switching cards clears session verification. The full
+profile is still incomplete on Kepler without a V/F table; the tested profile
+round trips explicitly excluded curve restoration.
+
+Support currently matches GTX 770 PCI 1184 / subsystem 1033196e and the
+observed controller identity at port 2. The other reported GPU families remain
+candidates, pending board-level validation. Evidence:
+[production and UI checks](experiments/kepler-ncp4206-control-47212.json).

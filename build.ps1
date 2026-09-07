@@ -54,7 +54,7 @@ $sourceDir = Join-Path $bundleDir 'source'
 function Get-SourceSnapshot {
     $paths = @(
         'app.py', 'druta.py', 'nvbackend.py', 'gpuload.py', 'profiles.py', 'startup.py',
-        'railctl.py', 'shuntmod.py', 'timings.py', 'timingwrite.py',
+        'railctl.py', 'ncp4206.py', 'shuntmod.py', 'timings.py', 'timingwrite.py',
         'Druta.spec', 'build.ps1', 'requirements.txt',
         'COPYING', 'THIRD-PARTY-NOTICES.md', 'README.md', 'MANUAL.md',
         'TECHNICALDOCUMENTATION.md', 'DEBUG-SUMMARY-RTX5080.md',
@@ -69,6 +69,7 @@ function Get-SourceSnapshot {
         'experiments/kepler-timing-writes-47212.json',
         'experiments/kepler-timing-sweep-47212.json',
         'experiments/kepler-ncp4206-identity-47212.json',
+        'experiments/kepler-ncp4206-control-47212.json',
         'tools/i2c_discover.py', 'tools/probe_volt_rails.py'
     )
     # Only the explicitly public measurement files above are included

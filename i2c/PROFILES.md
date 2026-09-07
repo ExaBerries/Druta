@@ -12,9 +12,13 @@ board where every value below was measured rather than assumed.
 
 NCP4206 discovery for GTX 770/780/780 Ti and the original TITAN/TITAN Black is
 tracked in the [driver compatibility matrix](../DRIVER-COMPATIBILITY.md#i2c-regulator-discovery-ncp4206).
-The local GTX 770 answers identity reads at NVAPI port 2, address 0x20; a
-validated NCP4206 write profile does not yet ship. The absence of a matching
-TOML profile must not be read as absence of I2C support on those GPUs.
+The local GTX 770 uses the validated absolute-voltage adapter in
+`ncp4206.py` at NVAPI port 2, address 0x20. This is a built-in protocol adapter,
+not an offset TOML recipe: setting a target requires an ordered command plus
+two VID_EN bits, and Auto must clear those bits before restoring an off code.
+Its command/mode capture participates in tuning profiles and Undo. Normal and
+XOC request ceilings are 1281 and 2000 mV; the VID encoding still refuses above
+1600 mV. Other NCP4206 boards require their own identity and response checks.
 
 ---
 

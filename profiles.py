@@ -234,10 +234,13 @@ def capture_rails(gpu, state, rail):
         missing.append(f"voltage/clock offsets NOT captured ({e})")
     if rail is not None and not rail.p.read_only:
         try:
-            offset = rail.telemetry().get("offset_mv")
-            if offset is None:
-                raise ValueError("offset read failed")
-            state["i2c"] = dict(rail_identity(rail), offset_mv=offset)
+            if getattr(rail, "absolute_voltage", False):
+                state["i2c"] = dict(rail_identity(rail), control=rail.capture_control())
+            else:
+                offset = rail.telemetry().get("offset_mv")
+                if offset is None:
+                    raise ValueError("offset read failed")
+                state["i2c"] = dict(rail_identity(rail), offset_mv=offset)
         except Exception as e:
             missing.append(f"I2C offset NOT captured ({e})")
     # Unticking XOC does not undo above-normal values already in the card.
@@ -248,9 +251,15 @@ def capture_rails(gpu, state, rail):
     required = required or (offset is not None and not -100 <= offset <= 200)
     required = required or bool(state["clock_domain_offsets_mhz"].get("2"))
     if state["i2c"]:
-        offset = state["i2c"]["offset_mv"]
-        required = required or not (getattr(rail.p, "env_min", -200) <= offset
-                                   <= getattr(rail.p, "env_max", 100))
+        if "control" in state["i2c"]:
+            try:
+                rail.validate_control(state["i2c"]["control"], xoc=False)
+            except ValueError:
+                required = True
+        else:
+            offset = state["i2c"]["offset_mv"]
+            required = required or not (getattr(rail.p, "env_min", -200) <= offset
+                                       <= getattr(rail.p, "env_max", 100))
     state["xoc"] = state["xoc"] or required
 
 
@@ -318,11 +327,18 @@ def preflight(gpu, state, rail=None):
                     raise ValueError(f"unconfirmed clock control {key}")
                 number(value)
         if i2c:
-            number(i2c["offset_mv"])
             if rail is None or rail.p.read_only or not rail.present():
                 raise ValueError("saved I2C regulator is not available")
             if any(i2c.get(k) != v for k, v in rail_identity(rail).items()):
                 raise ValueError("I2C regulator/profile/limits changed; save a fresh profile")
+            if getattr(rail, "absolute_voltage", False):
+                if "offset_mv" in i2c:
+                    raise ValueError("absolute I2C voltage cannot load an offset")
+                rail.validate_control(i2c.get("control"), xoc=bool(state.get("xoc")))
+            else:
+                if "control" in i2c:
+                    raise ValueError("offset I2C regulator cannot load absolute voltage")
+                number(i2c["offset_mv"])
     except Exception as e:
         return str(e)
     return None
@@ -465,11 +481,15 @@ def restore(gpu, state, apply_curve=True, *, rail=None, i2c_verified=False):
         if not step("NVVDD offset", restore_offset):
             return results + [(False, "profile stopped after NVVDD offset failure")]
     if state.get("i2c"):
-        offset = state["i2c"]["offset_mv"]
-        if not step("I2C dry run", lambda: rail.plan(offset)):
-            return results
-        if not step("I2C offset", lambda: rail.set_offset_mv(offset, acknowledged=True)):
-            return results
+        if "control" in state["i2c"]:
+            if not step("I2C voltage/mode", lambda: rail.restore_control(state["i2c"]["control"])):
+                return results
+        else:
+            offset = state["i2c"]["offset_mv"]
+            if not step("I2C dry run", lambda: rail.plan(offset)):
+                return results
+            if not step("I2C offset", lambda: rail.set_offset_mv(offset, acknowledged=True)):
+                return results
 
     mw = state.get("power_limit_mw")
     if mw:
@@ -562,7 +582,13 @@ def summarize(state):
         bits.append(f"NVVDD offset {offset:+g} mV")
     i2c = state.get("i2c")
     if i2c:
-        bits.append(f"I2C {i2c['rail']} {i2c['offset_mv']:+g} mV ({i2c['profile']})")
+        if "control" in i2c:
+            from ncp4206 import decode_vid
+            control = i2c["control"]
+            target = (f"{decode_vid(control['command']):g} mV" if control['enabled'] else 'Auto (GPU VID)')
+            bits.append(f"I2C {i2c['rail']} {target} ({i2c['profile']})")
+        else:
+            bits.append(f"I2C {i2c['rail']} {i2c['offset_mv']:+g} mV ({i2c['profile']})")
     for key, value in (state.get("clock_domain_offsets_mhz") or {}).items():
         label = "Additional Memory Clock Offset" if key == "2" else f"clock control {key}"
         bits.append(f"{label} {value:+g} MHz")
