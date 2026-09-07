@@ -186,3 +186,68 @@ hide private offsets and unavailable power/voltage sliders; refuse Max it before
 any writes when the V/F curve cannot be read. Regular and limited de-flatten
 remain unavailable on this adapter. These observations do not establish a
 Kepler voltage ceiling or maximum stable overclock.
+
+### GTX 770 GPU/memory clock-lock support
+
+On this GTX 770 / GK104 with driver 472.12, both NVML clock-lock setters
+return **Not Supported (3)** while running as administrator:
+
+| API | Requested range | Result |
+| --- | --- | --- |
+| `nvmlDeviceSetGpuLockedClocks` | 1176..1176 MHz | Not Supported (3) |
+| `nvmlDeviceSetMemoryLockedClocks` | 3505..3505 MHz | Not Supported (3) |
+
+The application-clock and default-application-clock getters also return
+Not Supported for graphics and memory. No application-clock setter was tested.
+This is a measured limitation of these APIs on this board/driver, not evidence
+that every possible Kepler P-state-control mechanism is unavailable. The
+backend's generic "needs admin" suffix does not explain this failure: the
+test process was already elevated and the driver returned Not Supported.
+
+Timing tests used a checked CUDA workload to maintain P0, verifying P0 and
+3505 MHz memory before and after writes. This was not an enforced P-state lock.
+
+### Kepler timing-field sweep
+
+The following one-cycle increases landed, held in the broadcast register and
+all four FBPA partitions, and restored exactly. Every other captured register
+was checked for unintended changes after each write and restoration.
+
+| Field | Original -> requested |
+| --- | --- |
+| RC | 71 -> 72 |
+| RFC | 114 -> 115 |
+| RAS | 50 -> 51 |
+| RP | 22 -> 23 |
+| RD_RCD | 25 -> 26 |
+| WR_RCD | 18 -> 19 |
+| CDLR | 10 -> 11 |
+| WR | 19 -> 20 |
+| R2W_BUS | 8 -> 9 |
+| PDEX | 15 -> 16 |
+| PDEN2PDEX | 7 -> 8 |
+| FAW | 32 -> 33 |
+| CCDL | 2 -> 3 |
+| CCDS | 2 -> 3 |
+| RRD | 8 -> 9 |
+
+**CL is not validated for live adjustment: 18 -> 19 caused a driver
+timeout/recovery.** nvtune initially reported
+applied and verified, but the CUDA checker failed with CUDA_ERROR_LAUNCH_FAILED
+and Windows logged Display event 4101. The later original-value readback must
+not be classified as an ignored write or a read-only register. This test does
+not establish whether CL is restricted to POST/training, or whether a working
+change requires coordinated controller/DRAM programming. Restoration read back the entire
+original timing-register set; a fresh checked load recovered normally. CL was
+not retried. WL, RPRE, WPRE and WRCRC were left untested after this failure.
+
+W2R_BUS 12 -> 13 and AOND 0 -> 1 produced nvtune range warnings and were not
+committed. Structural/training fragments, split refresh fields and the inferred
+TIMING22 fields remained read-only. No force or daemon mode was used.
+
+The successful 15-field sweep completed 207 full 64 MiB pattern comparisons
+with zero mismatches. A final fresh-load check matched all original timing
+registers and passed another 49 comparisons. Core/memory offsets remained zero
+and the fan remained on automatic policy. These short checks establish register
+response and recovery, not maximum performance or long-term stability.
+Evidence: `experiments/kepler-timing-sweep-47212.json`.
