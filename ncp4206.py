@@ -182,7 +182,41 @@ class NCP4206(Rail):
                                          'command': encode_vid(float(mv))})
 
     def reset(self):
-        return self.restore_control({'kind': 'absolute_vid', 'enabled': False, 'command': 0})
+        with self._mutex:
+            try:
+                self.capture_control()
+            except ValueError:
+                # A failed write and rollback can leave the paired modes
+                # inconsistent. Normal Apply must reject that state, but Auto
+                # can still release the override without replaying a command.
+                return self._recover_auto()
+            return self.restore_control({'kind': 'absolute_vid', 'enabled': False, 'command': 0})
+
+    def _recover_auto(self):
+        """Clear only VID_EN after re-identifying an unreadable control state."""
+        try:
+            if not self.present():
+                raise ValueError('NCP4206 identity is unavailable')
+            values = [(reg, self.read(reg, 1)) for reg in (0xd2, 0xd3)]
+            if any(type(value) is not int or not 0 <= value <= 255
+                   for _, value in values):
+                raise ValueError('NCP4206 configuration read failed')
+            errors = []
+            for reg, value in values:
+                try:
+                    self._write_checked(reg, value & ~8, 1)
+                except Exception as exc:
+                    # Still attempt to release the other half. Never roll
+                    # back by re-enabling a mode whose command is unknown.
+                    errors.append(str(exc))
+            for reg, value in values:
+                if self.read(reg, 1) != (value & ~8):
+                    errors.append(f'NCP4206 0x{reg:02X} Auto readback mismatch')
+            if errors:
+                return False, 'NCP4206 Auto recovery failed: ' + '; '.join(errors)
+            return True, 'NCP4206 GPU VID mode restored; stored command left unchanged'
+        except Exception as exc:
+            return False, 'NCP4206 Auto recovery failed: ' + str(exc)
 
     def verify(self, *, acknowledged=False, ref=None, log=None):
         if not acknowledged:

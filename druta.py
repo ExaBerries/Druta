@@ -2461,11 +2461,13 @@ class Druta:
                 tel = self.rail.telemetry()
                 measured = tel.get("vout_mv")
                 if measured is None:
+                    self.invalidate_i2c_verification()
                     return None
                 return (f"Auto {measured:.0f}" if tel.get("target_mv") is None
                         else f"{measured:.0f} mV")
             v = self.rail.read_vout()
         except Exception:                                       # noqa: BLE001
+            self.invalidate_i2c_verification()
             return None
         if v is None:
             self.invalidate_i2c_verification()
