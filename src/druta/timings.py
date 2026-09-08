@@ -828,6 +828,12 @@ def _finite_number(value):
         return False
 
 
+def known_timing_layout(codename):
+    """Whether nvtune identified a chip instead of selecting a generic layout."""
+    return (isinstance(codename, str) and bool(codename.strip())
+            and not codename.strip().upper().startswith(("UNKNOWN", "UNSUPPORTED", "GENERIC")))
+
+
 def performance_band_floor(mem_states, codename=""):
     """Nominal top-band floor, restricted to the clock pairs actually measured.
 
@@ -904,6 +910,10 @@ class Snapshot:
     elapsed: float = 0.0         # how long the nvtune call took
 
     @property
+    def layout_known(self):
+        return known_timing_layout(self.codename)
+
+    @property
     def mem_stable(self):
         """Did the memory clock hold still across the capture? A False here
         makes the whole ns column meaningless, which is why it is a property of
@@ -930,7 +940,7 @@ class Snapshot:
         42 ns of truth as 385 ns of nonsense. .ns is still computed and kept -
         nothing is thrown away - but a UI that shows a number here is showing
         arithmetic against a clock the card had already left."""
-        return self.mem_stable and self.mem_true_mhz is not None
+        return self.layout_known and self.mem_stable and self.mem_true_mhz is not None
 
     @property
     def key(self):
@@ -1192,6 +1202,13 @@ def snapshot(gpu=None, override=None, timeout=20.0):
         snap.mem_after, snap.pstate_after = _state_now(gpu)
         # ------------------------------------------------------------------ #
 
+        if r.returncode != 0:
+            # A failed save can leave a parseable partial file. Keep its path
+            # for diagnosis, but never present its registers as a good capture.
+            snap.json_path = path if os.path.isfile(path) else ""
+            snap.error = (f"nvtune save exited {r.returncode}: "
+                          f"{(r.stderr or r.stdout or 'no error text').strip()[:400]}")
+            return snap
         if not os.path.isfile(path):
             snap.error = (f"nvtune save wrote no file (exit {r.returncode}): "
                           f"{(r.stderr or r.stdout or '').strip()[:400]}")
@@ -1234,9 +1251,16 @@ def snapshot(gpu=None, override=None, timeout=20.0):
             snap.error = "snapshot JSON has no 'broadcast' register set"
             return snap
         snap.scopes = _scope_order(snap.registers)
+        if not snap.layout_known:
+            snap.warnings.append(
+                f"nvtune has no confirmed timing layout for {snap.codename or 'this chip'}; "
+                "raw registers only, decoded timing fields and writes are unavailable")
 
         bc = snap.registers["broadcast"]
         for f in ft.fields:
+            if not snap.layout_known:
+                snap.readings.append(Reading(field=f, ns_refusal="unknown timing layout; raw registers only"))
+                continue
             if f.register not in bc:
                 # a field whose register this build did not dump: shown with
                 # no value rather than silently dropped from the table
@@ -1263,6 +1287,8 @@ def snapshot(gpu=None, override=None, timeout=20.0):
         for scope in snap.scopes:
             sv = snap.registers[scope]
             for f in ft.fields:
+                if not snap.layout_known:
+                    continue
                 if f.register not in sv or f.register not in bc:
                     continue
                 a, b = f.extract(bc[f.register]), f.extract(sv[f.register])

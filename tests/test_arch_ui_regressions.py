@@ -166,7 +166,8 @@ class ResetReadbackUiTests(FakeUiTest):
     def test_fresh_readbacks_replace_requests_and_confirmed_release_clears_hold(self):
         self.app._clk_lock = {"kind": Druta.LOCK_VF, "idx": 10}
         self.app.gpu.reset_all.return_value = [ResetStep(GPU.VF_LOCK_STEP, (True, "released"))]
-        self.app.gpu.read.return_value = {"core_off": 0, "mem_off": 0, "pl_now_mw": 180000}
+        self.app.gpu.read.return_value = {"core_off": 0, "mem_off": 0,
+                                          "pl_requested_mw": 180000, "pl_now_mw": 200000}
         self.app.gpu.read_voltage_boost.return_value = 0
         self.app.gpu.read_rail_offset_mv.return_value = 0
         self.app.gpu.read_clk_domain_offsets.return_value = ({self.knob.ctrl: {"freq_khz": 0}}, "")

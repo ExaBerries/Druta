@@ -112,6 +112,16 @@ def capture(gpu, rail=None):
     except Exception:
         pass
     mem_units = d.get("mem_off")
+    power_reader = getattr(gpu, "read_power_limit_mw", None)
+    power_error = ""
+    if callable(power_reader):
+        try:
+            power_limit = power_reader()
+        except Exception as exc:
+            power_limit, power_error = None, str(exc)
+    else:
+        # Compatibility for older adapters without the configured-limit getter.
+        power_limit = d.get("pl_requested_mw", d.get("pl_now_mw"))
     now = time.time()
     state = {
         "schema": SCHEMA,
@@ -139,8 +149,8 @@ def capture(gpu, rail=None):
         "mem_off_units": mem_units,
         "mem_off_true_mhz": (mem_units / scale) if mem_units is not None else None,
         "mem_off_scale": scale,
-        # the applied limit is "pl_now_mw"; fan duty lives in the per-fan list
-        "power_limit_mw": d.get("pl_now_mw"),
+        # The enforced ceiling can lag/quantize; replay the configured request.
+        "power_limit_mw": power_limit,
         "volt_boost_pct": None,
         # Duty alone is not restorable state. A card idling at 0% on the auto
         # curve and a card pinned to 0% manually read identically, and handing
@@ -153,6 +163,11 @@ def capture(gpu, rail=None):
         "vf_applicable": vf_applicable(gpu),
         INCOMPLETE_KEY: [],
     }
+    if (callable(power_reader) and power_limit is None
+            and gpu.static.get("pl_min_mw") is not None
+            and gpu.static.get("pl_max_mw") is not None):
+        state[INCOMPLETE_KEY].append("requested power limit NOT captured"
+                                     + (f" ({power_error})" if power_error else ""))
     # Modern NVML and the legacy NVAPI fallbacks expose requested per-fan
     # levels. The measured duty above can still be ramping toward that request.
     try:
@@ -216,9 +231,13 @@ def capture_rails(gpu, state, rail):
             if fields:
                 state["rail_limits_mv"][str(index)] = {
                     key: gpu.abs_limit_mv(record, key) for key in fields}
-        # A known writer with a failed read is different from an unsupported rail.
-        if reader and not records and any(gpu.volt_rail_limit_fields(r) for r in (0, 1)):
-            missing.append("per-rail limits NOT captured")
+        # One readable rail does not prove a complete capture on a two-rail
+        # board. Name each known writer whose state this undo point is missing.
+        if reader:
+            for index in (0, 1):
+                if (gpu.volt_rail_limit_fields(index)
+                        and str(index) not in state["rail_limits_mv"]):
+                    missing.append(f"per-rail limits NOT captured (rail {index})")
     except Exception as e:
         missing.append(f"per-rail limits NOT captured ({e})")
     try:
@@ -344,7 +363,13 @@ def _validate_saved_fields(gpu, state):
             raise ValueError("memory offset is outside the driver's representation")
         if units != int(units):
             raise ValueError("memory offset is not representable in driver units")
+        step = getattr(gpu, "memory_offset_step_units", lambda: 1)()
+        _number(step, "memory offset step", integer=True)
+        if step <= 0 or units % step:
+            raise ValueError("memory offset is not representable on this GPU/driver's offset grid")
     power = state.get("power_limit_mw")
+    if power is not None:
+        _number(power, "power limit", integer=True)
     if power:
         low = gpu.static.get("pl_min_mw", 50000)
         high = gpu.static.get("pl_max_mw", 400000)
@@ -699,7 +724,7 @@ def summarize(state):
         bits.append(f"mem {mm:+g} MHz")
     mw = state.get("power_limit_mw")
     if mw:
-        bits.append(f"PL {int(mw) // 1000} W")
+        bits.append(f"PL {mw / 1000:g} W")
     vb = state.get("volt_boost_pct")
     if vb is not None:
         bits.append(f"vboost {vb}%")

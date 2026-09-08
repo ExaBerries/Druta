@@ -1552,6 +1552,8 @@ class GPU:
     def __init__(self, slot=None):
         self._lock = threading.RLock()
         self._legacy_p0_owned = False
+        self._vf_lock_recovery = None
+        self._last_clock_lock_request = None
         # The card this object speaks for, fixed at construction. Nothing
         # re-targets a live GPU: switching cards builds a NEW GPU, which is what
         # keeps the probed per-instance caches (_vfp_layout_cache at 128 entries
@@ -1665,19 +1667,13 @@ class GPU:
                 pass
             # supported clock range (for locked-clock UI bounds)
             try:
-                cnt = u32(64)
-                arr = (u32 * 64)()
-                if nv.dll.nvmlDeviceGetSupportedMemoryClocks(
-                        nv.dev, ctypes.byref(cnt), arr) == 0 and cnt.value:
-                    memclks = sorted(arr[i] for i in range(cnt.value))
+                memclks = self._supported_nvml_clocks("nvmlDeviceGetSupportedMemoryClocks")
+                if memclks:
                     s["mem_clocks"] = memclks
-                    n = u32(256)
-                    ga = (u32 * 256)()
-                    if nv.dll.nvmlDeviceGetSupportedGraphicsClocks(
-                            nv.dev, memclks[-1], ctypes.byref(n), ga) == 0:
-                        g = [ga[i] for i in range(n.value)]
-                        if g:
-                            s["gfx_min"], s["gfx_max"] = min(g), max(g)
+                    g = self._supported_nvml_clocks(
+                        "nvmlDeviceGetSupportedGraphicsClocks", u32(memclks[-1]))
+                    if g:
+                        s["gfx_min"], s["gfx_max"] = min(g), max(g)
             except Exception:
                 pass
             # fan min/max (manual-duty floor)
@@ -1944,6 +1940,9 @@ class GPU:
     def _read_power(self, d):
         nv = self.nvml
         if nv.ok:
+            requested = self.read_power_limit_mw()
+            if requested is not None:
+                d["pl_requested_mw"] = requested
             v = u32(0)
             if nv.has("nvmlDeviceGetPowerUsage") and \
                     nv.dll.nvmlDeviceGetPowerUsage(nv.dev, ctypes.byref(v)) == 0:
@@ -2288,6 +2287,23 @@ class GPU:
         div = self.static.get("mem_div")
         return (2 * div, "MHz true") if div else (2, "MHz eff")
 
+    def memory_offset_step_units(self):
+        """Measured request granularity, in driver offset units; no driver calls.
+
+        This RTX 5080/580.97 combination truncates odd NVML memory-offset
+        requests to even units. Its exact PCI/VBIOS identity establishes the
+        Blackwell scope without querying architecture during profile preflight.
+        Other adapters and the Pstates20 transport keep the existing unit grid.
+        """
+        nv = getattr(self, "nvml", None)
+        if not (nv and nv.ok and nv.has("nvmlDeviceSetClockOffsets")):
+            return 1
+        selected = getattr(nv, "selected", None) or {}
+        static = getattr(self, "static", {})
+        key = (selected.get("devid"), selected.get("subsys"),
+               str(static.get("vbios", "")).lower(), static.get("driver"))
+        return 2 if key == (0x2C02, 2313031747, "98.03.3b.c0.6f", "580.97") else 1
+
     def clock_step_khz(self):
         """This card's core-clock grid in kHz, derived from the driver.
 
@@ -2408,9 +2424,10 @@ class GPU:
         if not -(1 << 31) <= scaled < (1 << 31):
             return False, f"{dom} offset exceeds the driver's signed 32-bit range"
         units = int(scaled)
-        if units != scaled:
+        step = self.memory_offset_step_units() if ctype == 2 else 1
+        if units != scaled or units % step:
             return False, (f"{dom} offset {mhz:+g} {unit} is not representable; "
-                           f"use multiples of {1 / scale:g} {unit}")
+                           f"use multiples of {step / scale:g} {unit}")
         rng = self._offset_range(ctype)
         if modern and ctype == 2 and rng is None:
             return False, "memory offset range/readback is unavailable; no write issued"
@@ -3386,20 +3403,90 @@ class GPU:
         return True, (f"{name} offset {was/1000:+.0f} -> {khz/1000:+.0f} MHz "
                       f"(requested; the driver floors to whole clock bins)")
 
+    def read_power_limit_mw(self):
+        """Configured power request in mW, or None when its getter is unreadable.
+
+        The enforced limit is a different, potentially delayed constraint and
+        must not stand in for the user's setting in profiles or write readback.
+        """
+        nv = self.nvml
+        if not nv.ok or not nv.has("nvmlDeviceGetPowerManagementLimit"):
+            return None
+        try:
+            value = u32(0)
+            status = nv.dll.nvmlDeviceGetPowerManagementLimit(nv.dev, ctypes.byref(value))
+            return value.value if status == 0 and value.value > 0 else None
+        except Exception:
+            return None
+
     def set_power_limit_mw(self, mw):
         nv = self.nvml
         if not nv.ok or not nv.has("nvmlDeviceSetPowerManagementLimit"):
             return False, "SetPowerManagementLimit not available"
+        if type(mw) not in (int, float):
+            return False, "power limit must be a finite number in whole milliwatts"
+        try:
+            valid = math.isfinite(mw) and 0 < mw < (1 << 32) and int(mw) == mw
+        except OverflowError:
+            valid = False
+        if not valid:
+            return False, "power limit must be a finite number in whole milliwatts"
         mw = int(mw)
         # driver constraints if known, else a conservative sanity envelope
         mn = self.static.get("pl_min_mw", 50000)
         mx = self.static.get("pl_max_mw", 400000)
         if not (mn <= mw <= mx):
-            return False, f"limit {mw/1000:.0f} W out of [{mn/1000:.0f}..{mx/1000:.0f}] W"
+            return False, f"limit {mw/1000:g} W out of [{mn/1000:g}..{mx/1000:g}] W"
+        if self.read_power_limit_mw() is None:
+            return False, "configured power-limit readback is unavailable; no write issued"
         st = nv.dll.nvmlDeviceSetPowerManagementLimit(nv.dev, u32(mw))
         if st == 0:
-            return True, f"power limit set to {mw/1000:.0f} W"
+            got = self.read_power_limit_mw()
+            if got is None:
+                return False, "power limit was sent, but configured-limit readback failed"
+            if got != mw:
+                return False, (f"power limit requested {mw/1000:g} W, but the driver "
+                               f"reports a configured limit of {got/1000:g} W")
+            return True, f"power limit configured to {got/1000:g} W"
         return False, f"power limit failed: {nv.errstr(st)}"
+
+    def _supported_nvml_clocks(self, function, *selectors):
+        """Read a complete variable-length NVML clock list, or return no list.
+
+        RTX 5080 exposes 389 graphics clocks per performance memory row, more
+        than the former 256-entry buffer. Query the required count first and
+        allow bounded growth retries. Never use a truncated result or trust a
+        returned count beyond the allocated buffer.
+        """
+        nv = self.nvml
+        if not (nv.ok and nv.has(function)):
+            return []
+        maximum = 4096
+        try:
+            getter = getattr(nv.dll, function)
+            count = u32(0)
+            status = getter(nv.dev, *selectors, ctypes.byref(count), None)
+            if status not in (0, 7):  # NVML_SUCCESS / NVML_ERROR_INSUFFICIENT_SIZE
+                return []
+            capacity = count.value
+            for _ in range(3):
+                if not 0 < capacity <= maximum:
+                    return []
+                values = (u32 * capacity)()
+                count = u32(capacity)
+                status = getter(nv.dev, *selectors, ctypes.byref(count), values)
+                if status == 7:
+                    if count.value <= capacity:
+                        return []
+                    capacity = count.value
+                    continue
+                if status != 0 or not 0 < count.value <= capacity:
+                    return []
+                clocks = list(values[:count.value])
+                return sorted(set(clocks)) if all(clocks) else []
+        except (AttributeError, OSError, TypeError, ValueError, OverflowError):
+            return []
+        return []
 
     @_synchronized
     def lockable_clocks_by_mem(self):
@@ -3413,17 +3500,21 @@ class GPU:
         if not (nv.ok and nv.has("nvmlDeviceGetSupportedGraphicsClocks")):
             return out
         for m in (self.static.get("mem_clocks") or []):
-            n = u32(256)
-            arr = (u32 * 256)()
-            if nv.dll.nvmlDeviceGetSupportedGraphicsClocks(
-                    nv.dev, u32(m), ctypes.byref(n), arr) != 0:
-                continue
-            g = sorted(arr[i] for i in range(min(n.value, 256)))
+            g = self._supported_nvml_clocks("nvmlDeviceGetSupportedGraphicsClocks", u32(m))
             if g:
                 out.append((m, g))
         return out
 
+    def last_clock_lock_request(self):
+        """The exact last successful frequency-lock command from this instance.
+
+        This is the snapped range sent to the driver, not a physical-clock
+        observation. A failed new request or successful release clears it.
+        """
+        return getattr(self, "_last_clock_lock_request", None)
+
     def lock_gpu_clocks(self, mn_mhz, mx_mhz):
+        self._last_clock_lock_request = None
         nv = self.nvml
         if not nv.ok or not nv.has("nvmlDeviceSetGpuLockedClocks"):
             return False, "SetGpuLockedClocks not available"
@@ -3456,6 +3547,7 @@ class GPU:
             note = ""
         st = nv.dll.nvmlDeviceSetGpuLockedClocks(nv.dev, u32(sn_mn), u32(sn_mx))
         if st == 0:
+            self._last_clock_lock_request = (sn_mn, sn_mx)
             return True, f"GPU clock locked to [{sn_mn}..{sn_mx}] MHz{note}"
         return False, f"lock failed: {nv.errstr(st)} (needs admin)"
 
@@ -3545,12 +3637,14 @@ class GPU:
             return False, "ResetGpuLockedClocks not available"
         st = nv.dll.nvmlDeviceResetGpuLockedClocks(nv.dev)
         if st == 0:
+            self._last_clock_lock_request = None
             return True, "GPU clock lock released"
         # NVML documents this pair for Volta or newer. A stock reset on a
         # positively identified Pascal card has no such lock to release.
         # Direct Release keeps reporting the driver's failure, and every
         # other error (including permission/device loss) remains a failure.
         if st == 3 and allow_pascal_noop and self.arch() == self.ARCH_PASCAL:
+            self._last_clock_lock_request = None
             return True, "NVML frequency lock is not applicable to Pascal; nothing to reset"
         return False, f"reset failed: {nv.errstr(st)}"
 
@@ -3598,9 +3692,11 @@ class GPU:
         lockable domains."""
         return [cl.locks[k] for k in range(min(cl.count, 32))]
 
-    def read_vf_lock(self):
-        """The V/F point lock the card is holding NOW, or None when nothing is
-        locked (or the getter did not answer - same as read_voltage_boost).
+    def read_vf_lock_status(self, domain=None):
+        """Return (point lock, error), distinguishing unlocked from unreadable.
+
+        An explicit domain checks only that target, so a second tuner's lock
+        earlier in the table cannot hide this session's own request.
 
             {domain, lockMode, volt_uV, volt_mv, count}
 
@@ -3612,16 +3708,29 @@ class GPU:
         re-asserting its own value gets caught."""
         cl = self._vf_lock_read_raw()
         if cl is None:
-            return None
-        for e in self._vf_lock_entries(cl):
+            return None, "V/F lock getter failed; the current lock is unknown"
+        entries = self._vf_lock_entries(cl)
+        if domain is not None:
+            entries = [e for e in entries if e.domain == domain]
+            if not entries:
+                return None, f"V/F lock domain {domain} is missing; its current state is unknown"
+        for e in entries:
             # mode 3 ONLY - a mode-2 entry in this table is the NVML frequency
             # lock and its field is kHz, so reporting it here would hand the
             # caller 1350.00 "mV" for a 1350 MHz clock lock
             if e.lockMode == VF_LOCK_MODE_POINT:
                 return {"domain": e.domain, "lockMode": e.lockMode,
                         "volt_uV": e.volt_uV, "volt_mv": e.volt_uV / 1000.0,
-                        "count": cl.count}
-        return None
+                        "count": cl.count}, None
+        return None, None
+
+    def read_vf_lock(self):
+        """Current point lock, or None for unlocked/unreadable (legacy reader API).
+
+        Ownership and cleanup decisions must use read_vf_lock_status(), because
+        a failed getter cannot establish that an accepted write was released.
+        """
+        return self.read_vf_lock_status()[0]
 
     def read_clk_lock(self):
         """The driver's current NVML frequency lock as (min_mhz, max_mhz).
@@ -3831,6 +3940,8 @@ class GPU:
         name the point really held must resolve the request against the curve
         (resolve_vf_point) or read the vcore rail."""
         a = self.nvapi
+        if self.vf_lock_recovery_pending():
+            return False, "V/F lock: the previous change needs recovery before another hold"
         if not self._vf_lock_available():
             return False, ("V/F point lock unavailable: 0xE440B867 / 0x39442CFB "
                            "did not both resolve")
@@ -3853,25 +3964,83 @@ class GPU:
         if target is None:
             return False, (f"V/F lock: domain {domain} is not in the driver's "
                            f"lock table (it lists {[e.domain for e in entries]})")
+        previous = (int(target.lockMode), int(target.volt_uV))
         target.lockMode = VF_LOCK_MODE_POINT
         target.volt_uV = volt_uv
         cl.version = a.ver(_ClockLock, VF_LOCK_VERSION)  # re-stamp; keep the rest
-        st = a.VfLockSet(a.gpu, ctypes.byref(cl))
-        if st != 0:
-            return False, f"V/F lock write failed (status {st}) - needs admin"
-        got = self.read_vf_lock()
-        if got is None:
-            return False, ("V/F lock write returned OK but the card reports no "
-                           "lock - another tool may have taken it straight back")
-        if got["volt_uV"] != volt_uv:
-            return False, (f"V/F lock: wrote {volt_uv / 1000.0:.2f} mV but the card "
-                           f"reports {got['volt_mv']:.2f} mV on domain "
-                           f"{got['domain']} - another tool holds this lock")
-        return True, (f"V/F point lock set on domain {got['domain']}, requested "
+        # Record cleanup before calling the setter: even a failed verification
+        # must not turn an accepted write into a hold nobody owns on exit.
+        self._vf_lock_recovery = {"domain": domain, "previous": previous,
+                                  "requested": (VF_LOCK_MODE_POINT, volt_uv)}
+        try:
+            st = a.VfLockSet(a.gpu, ctypes.byref(cl))
+            if st != 0:
+                reason = f"V/F lock write failed (status {st}) - needs admin"
+            else:
+                back = self._vf_lock_read_raw()
+                got = next((e for e in self._vf_lock_entries(back)
+                            if e.domain == domain), None) if back is not None else None
+                if got is not None and (got.lockMode, got.volt_uV) == (VF_LOCK_MODE_POINT, volt_uv):
+                    self._vf_lock_recovery = None
+                    return True, (f"V/F point lock set on domain {domain}, requested "
                       f"{volt_uv / 1000.0:.2f} mV - the hardware holds the highest "
                       f"V/F point at or below that")
+                reason = ("V/F lock write returned OK but its verification read failed"
+                          if back is None else
+                          "V/F lock write returned OK but the requested lock was not read back")
+        except Exception as exc:
+            reason = f"V/F lock write/verification failed: {exc}"
+        restored, message = self.recover_vf_lock()
+        return False, reason + "; " + (message if restored else "RECOVERY REQUIRED: " + message)
 
-    def clear_vf_lock(self):
+    def vf_lock_recovery_pending(self):
+        """Whether an unsuccessful hold still needs its prior state restored."""
+        return getattr(self, "_vf_lock_recovery", None) is not None
+
+    def recover_vf_lock(self):
+        """Retry a failed hold's rollback without replaying an old whole buffer.
+
+        Only restore this request's target mode/value. All other bytes come
+        from a fresh GET, so an independent frequency lock or newer driver
+        fields survive. A different target request belongs to another writer;
+        refuse to overwrite it and retain the recovery record for the caller.
+        """
+        pending = getattr(self, "_vf_lock_recovery", None)
+        if pending is None:
+            return True, "no V/F lock recovery is pending"
+        if not self._vf_lock_available():
+            return False, "V/F lock recovery is unavailable"
+        try:
+            cl = self._vf_lock_read_raw()
+            if cl is None:
+                return False, "V/F lock recovery getter failed; refusing to write blind"
+            target = next((e for e in self._vf_lock_entries(cl)
+                           if e.domain == pending["domain"]), None)
+            if target is None:
+                return False, "V/F lock recovery target is missing from the current table"
+            current = (target.lockMode, target.volt_uV)
+            if current == pending["previous"]:
+                self._vf_lock_recovery = None
+                return True, "previous V/F lock state is confirmed restored"
+            if current != pending["requested"]:
+                return False, "V/F lock target changed concurrently; leaving its current request untouched"
+            target.lockMode, target.volt_uV = pending["previous"]
+            a = self.nvapi
+            cl.version = a.ver(_ClockLock, VF_LOCK_VERSION)
+            st = a.VfLockSet(a.gpu, ctypes.byref(cl))
+            if st != 0:
+                return False, f"V/F lock recovery write failed (status {st})"
+            back = self._vf_lock_read_raw()
+            got = next((e for e in self._vf_lock_entries(back)
+                        if e.domain == pending["domain"]), None) if back is not None else None
+            if got is None or (got.lockMode, got.volt_uV) != pending["previous"]:
+                return False, "V/F lock recovery was sent but the previous state could not be verified"
+            self._vf_lock_recovery = None
+            return True, "previous V/F lock state restored and verified"
+        except Exception as exc:
+            return False, f"V/F lock recovery failed: {exc}"
+
+    def clear_vf_lock(self, domain=None, expected_uv=None):
         """Release the V/F point lock: lockMode 0 on every locked entry, by the
         same read-modify-write.
 
@@ -3883,7 +4052,9 @@ class GPU:
         Mode-2 entries are left strictly alone. They are the NVML frequency
         lock sharing this table, and reset_gpu_clocks() owns those; clearing
         them from here would mean "release the V/F lock" quietly released the
-        other mechanism too."""
+        other mechanism too. An explicit domain/expected request releases only
+        the hold the caller owns; Reset all deliberately leaves both unset.
+        """
         a = self.nvapi
         if not self._vf_lock_available():
             return False, ("V/F point lock unavailable: 0xE440B867 / 0x39442CFB "
@@ -3891,9 +4062,18 @@ class GPU:
         cl = self._vf_lock_read_raw()
         if cl is None:
             return False, "V/F lock: getter failed, refusing to write blind"
-        held = [e for e in self._vf_lock_entries(cl)
+        entries = self._vf_lock_entries(cl)
+        if domain is not None:
+            entries = [e for e in entries if e.domain == domain]
+            if not entries:
+                return False, f"V/F lock domain {domain} is missing; refusing to assume it was released"
+        held = [e for e in entries
                 if e.lockMode == VF_LOCK_MODE_POINT]
+        if domain is not None and expected_uv is not None and held and held[0].volt_uV != expected_uv:
+            return True, "this V/F request is no longer held; the current target request was left untouched"
         if not held:
+            if domain is None:
+                self._vf_lock_recovery = None
             return True, "no V/F point lock was set"
         doms = [e.domain for e in held]
         for e in held:
@@ -3907,9 +4087,16 @@ class GPU:
         back = self._vf_lock_read_raw()
         if back is None:
             return False, "V/F lock release was sent, but the verification read failed"
-        if any(e.lockMode == VF_LOCK_MODE_POINT for e in self._vf_lock_entries(back)):
+        after = self._vf_lock_entries(back)
+        if domain is not None:
+            after = [e for e in after if e.domain == domain]
+            if not after:
+                return False, "V/F lock release target is missing from the verification read"
+        if any(e.lockMode == VF_LOCK_MODE_POINT for e in after):
             return False, ("V/F lock release returned OK but the card still "
                            "reports a lock - another tool is re-asserting it")
+        if domain is None:
+            self._vf_lock_recovery = None
         return True, (f"V/F point lock released "
                       f"(domain{'s' if len(doms) > 1 else ''} "
                       f"{', '.join(str(x) for x in doms)})")
@@ -5998,12 +6185,13 @@ if __name__ == "__main__":
 # Serialize every driver-touching entry point (RLock => nested calls are fine).
 for _m in ("read", "read_clock_domains", "read_vf_curve", "apply_vf_deltas",
            "reset_vf_curve",
-           "rephase_deltas", "set_clock_offset", "set_power_limit_mw",
+           "rephase_deltas", "set_clock_offset", "set_power_limit_mw", "read_power_limit_mw",
            "lock_gpu_clocks", "reset_gpu_clocks", "set_fan", "reset_fan",
            "hold_legacy_p0", "release_legacy_p0",
            "read_fan_control_state", "restore_fan_control_state",
            "read_fan_manual", "fan_capabilities",
-           "read_vf_lock", "read_clk_lock", "set_vf_lock", "clear_vf_lock",
+           "read_vf_lock", "read_vf_lock_status", "read_clk_lock", "set_vf_lock", "clear_vf_lock",
+           "recover_vf_lock",
            "vf_lock_self_test",
            "set_voltage_boost", "read_voltage_boost", "reset_all",
            "clkdom_debug_report", "clkdom_mapping_probe"):

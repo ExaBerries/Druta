@@ -2,6 +2,10 @@
 
 **Version 1.3.0** — [release notes](RELEASE-NOTES-1.3.0.md).
 
+Package-refactor validation: [Maxwell/Pascal](MAXWELL-PASCAL-VALIDATION.md)
+and [RTX 5080 / Blackwell](BLACKWELL-VALIDATION.md), including controlled
+writes, readbacks, restoration and the limits of the tested coverage.
+
 A monitor and tuner for Pascal/Turing/Blackwell NVIDIA cards, driven through NVAPI/NVML private
 interfaces. It edits the V/F curve
 with planners built around how the boost arbiter actually behaves, and reads and
@@ -819,6 +823,9 @@ Timing writings are quaduply guarded:
    rather than inferred from an unchanged read-back. That inference is exactly
    what recorded four of twenty-five fields as hardware rejections in an earlier
    sweep when they had never reached BAR0.
+   Druta reads the helper's advertised command convention first: newer helpers
+   receive explicit `--dry-run`; legacy helpers must explicitly advertise that
+   writes require `--commit`. An unrecognized convention refuses the preview.
 4. **A per-card stock backup**, keyed by the card's **UUID**, NOT by PCI
    slot or by model name. nvtune's own default is `<slot>.stock.json` with
    an existence-only check, so swapping cards in one slot silently skipped the

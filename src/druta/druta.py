@@ -89,7 +89,7 @@ import time
 import dearpygui.dearpygui as dpg
 
 from . import gpuload, paths, profiles, startup, shuntmod, timings, timingwrite
-from .nvbackend import (GPU, EVENT_REASONS, PERF_DECREASE_BITS, VF_STEP_KHZ,
+from .nvbackend import (GPU, EVENT_REASONS, PERF_DECREASE_BITS, VF_STEP_KHZ, VF_LOCK_DOMAIN,
                         VFP_POINTS, below_cap, enumerate_gpus, is_admin,
                         same_slot,
                         PRIV_CONFIRMED, PRIV_DOMAIN_ID, PRIV_LIKELY,
@@ -1398,7 +1398,7 @@ class Druta:
             self.log(msg, ok)
             return self.refresh_volt_limits()
         if key == "pl":
-            val = self.gpu.static.get("pl_def_mw", 260000) // 1000
+            val = self.gpu.static.get("pl_def_mw", 260000) / 1000
         else:
             val = 0
         for pre in ("sl_", "in_"):
@@ -2080,9 +2080,9 @@ class Druta:
                                 self.knob_cols()
                                 if all(k in st for k in ("pl_min_mw", "pl_max_mw", "pl_def_mw")):
                                     self.slider_row("pl", "Power limit (W)",
-                                                    st["pl_min_mw"] // 1000,
-                                                    st["pl_max_mw"] // 1000,
-                                                    st["pl_def_mw"] // 1000, self.apply_pl,
+                                                    st["pl_min_mw"] / 1000,
+                                                    st["pl_max_mw"] / 1000,
+                                                    st["pl_def_mw"] / 1000, self.apply_pl,
                                                     extra=("Stock", lambda: self.stock_knob("pl")))
 
                                 vb = self.gpu.read_voltage_boost()
@@ -2278,7 +2278,7 @@ class Druta:
     # ---- slider <-> text box, and what either is allowed to reach ---------- #
     @staticmethod
     def float_knob(key):
-        return key in ("mem", "rail", "i2crail") or key.startswith("vlim")
+        return key in ("mem", "pl", "rail", "i2crail") or key.startswith("vlim")
 
     def knob_input_value(self, key, value):
         """Encode fractional inputs on the same wire grid as their setter."""
@@ -2287,10 +2287,10 @@ class Druta:
         if not self.float_knob(key):
             return int(value)
         if isinstance(value, bool):
-            raise ValueError("voltage must be a number, not a boolean")
+            raise ValueError("value must be a number, not a boolean")
         value = float(value)
         if not math.isfinite(value):
-            raise ValueError("voltage must be finite")
+            raise ValueError("value must be finite")
         if key == "i2crail":
             if getattr(self.rail, "absolute_voltage", False):
                 # NCP4206 floors the requested voltage onto its VID grid.
@@ -2301,8 +2301,8 @@ class Druta:
                     or not math.isfinite(step) or step <= 0):
                 raise ValueError("controller offset step is unavailable")
             return round(value / step) * step
-        # Driver NVVDD offsets and absolute rail limits are integer microvolts.
-        # Normalize float-widget roundoff without losing the requested uV.
+        # Voltage requests use integer uV; power uses integer mW. Normalize
+        # float-widget roundoff without losing the requested driver unit.
         return round(value * 1000) / 1000
 
     def knob_bounds(self, key):
@@ -2487,9 +2487,10 @@ class Druta:
         # add_slider_int has no resolution, so the value is snapped on Apply and
         # written back to the slider - the number on screen is the number in the
         # card.
-        blackwell = self.gpu.clkdom_is_blackwell()
-        step_khz = ((self.gpu.clkdom_step_mhz() or self.step_mhz()) * 1000
-                    if blackwell else self.step_khz())
+        # This writes the graphics offset, including on Blackwell. Its private
+        # per-domain controls have a separate 1 MHz request granularity, which
+        # does not describe the V/F grid used by set_clock_offset.
+        step_khz = self.step_khz()
         bins = int(v) * 1000 // step_khz
         # ...but never past the driver's own floor. That bound is not a multiple
         # of 15 (-200 snaps DOWN to -210), so at the very bottom of the slider
@@ -2521,6 +2522,13 @@ class Druta:
         value = float(value)
         if not math.isfinite(value) or not math.isfinite(scale) or scale <= 0:
             raise ValueError("memory offset and its scale must be finite")
+        step = getattr(self.gpu, "memory_offset_step_units", lambda: 1)()
+        if type(step) is not int or step <= 0:
+            raise ValueError("memory offset step is unavailable")
+        if step > 1:
+            # The measured RTX 5080 driver truncates odd API units toward zero.
+            # Stage a request it can echo exactly before calling the setter.
+            return math.trunc(value * scale / step) * step / scale
         return round(value * scale) / scale
 
     def apply_mem(self, v):
@@ -2744,7 +2752,9 @@ class Druta:
                     or (worker is not None and worker.is_alive())
                     or getattr(self, "_i2c_restore_failed", False)
                     or getattr(self, "_profile_pending", None)
-                    or getattr(self, "_profile_applying", False))
+                    or getattr(self, "_profile_applying", False)
+                    or getattr(self, "_clk_lock", None)
+                    or self.vf_recovery_pending())
 
     def stop_i2c_verification(self):
         """Cancel, then wait for restoration while UI and logging still exist."""
@@ -2977,7 +2987,15 @@ class Druta:
 
     def apply_pl(self, v):
         if self.guard():
-            self.report(self.gpu.set_power_limit_mw(int(v) * 1000))
+            try:
+                value = self.knob_input_value("pl", v)
+            except (TypeError, ValueError, OverflowError) as exc:
+                self.log(f"power limit input: {exc}", False)
+                return
+            for tag in ("sl_pl", "in_pl"):
+                if dpg.does_item_exist(tag):
+                    dpg.set_value(tag, value)
+            self.report(self.gpu.set_power_limit_mw(int(round(value * 1000))))
 
     def apply_volt(self, v):
         if self.guard():
@@ -3128,9 +3146,9 @@ class Druta:
         step("fan 100%", lambda: self.gpu.set_fan(100), "sl_fan", 100)
         pl_max = st.get("pl_max_mw")
         if pl_max:
-            step(f"power limit {pl_max // 1000} W",
+            step(f"power limit {pl_max / 1000:g} W",
                  lambda: self.gpu.set_power_limit_mw(pl_max),
-                 "sl_pl", pl_max // 1000)
+                 "sl_pl", pl_max / 1000)
         else:
             self.log("max: power limit - this card reports no maximum", False)
         step("voltage boost 100%",
@@ -3254,6 +3272,10 @@ class Druta:
                  LOCK_VF: "V/F point lock (Ctrl+H)",
                  LOCK_P0: "legacy P0 hold"}
 
+    def vf_recovery_pending(self):
+        return bool(getattr(getattr(self, "gpu", None),
+                            "vf_lock_recovery_pending", lambda: False)())
+
     def release_current(self):
         """Drive the release that matches the record, and return its (ok, msg).
         With no record it falls back to the NVML reset: that is the mechanism
@@ -3262,8 +3284,26 @@ class Druta:
         an unrecorded V/F lock - that one is almost certainly another tuner's
         (this card was found holding Afterburner's), and taking someone else's
         lock away because a button was nearby is not this app's business."""
+        if self.vf_recovery_pending():
+            previous = (self._clk_lock or {}).get("previous_lock")
+            ok, message = self.gpu.recover_vf_lock()
+            if not ok:
+                return ok, message
+            # Recovery may reinstate an earlier lock this window owned. An
+            # explicit Release/exit must release that too. An unowned prior
+            # target is left restored, with no new claim of ownership.
+            self.set_lock_state(previous)
+            if previous:
+                ok, released = self.release_current()
+                return ok, message + "; " + released
+            return True, message
         if self._clk_lock and self._clk_lock.get("kind") == self.LOCK_VF:
-            return self.gpu.clear_vf_lock()
+            domain, requested = (self._clk_lock.get("domain"),
+                                 self._clk_lock.get("req_mv"))
+            if domain is None or requested is None:
+                return False, "owned V/F lock target is unknown; refusing an unscoped release"
+            return self.gpu.clear_vf_lock(domain=domain,
+                                          expected_uv=int(round(requested * 1000)))
         if ((self._clk_lock or {}).get("kind") == self.LOCK_P0
                 or getattr(self.gpu, "legacy_p0_owned", lambda: False)()):
             result = self.gpu.release_legacy_p0()
@@ -3280,6 +3320,9 @@ class Druta:
         Returns False when the old lock could NOT be released, in which case
         the new one must not be taken either: the record has to keep describing
         what the card is really doing."""
+        if self.vf_recovery_pending():
+            self.log("V/F lock recovery is pending; use Release before taking another lock", False)
+            return False
         cur = self._clk_lock
         if not cur or cur.get("kind") == kind:
             return True
@@ -3299,10 +3342,28 @@ class Druta:
         if not self.handover(self.LOCK_NVML):
             return
         ok, m = self.gpu.lock_gpu_clocks(mn, mx)
-        self.report((ok, m))
         if ok:
-            self.set_lock_state({"kind": self.LOCK_NVML,
-                                 "lo": mn, "hi": mx})
+            self.record_clock_lock()
+        self.report((ok, m))
+
+    def record_clock_lock(self):
+        """Own the accepted lock and show the exact range sent to the driver."""
+        state = {"kind": self.LOCK_NVML, "verified": False}
+        # Metadata failure after an accepted SET is not a release. Keep the
+        # cleanup record before attempting another getter or updating widgets.
+        self._clk_lock = state
+        try:
+            requested = self.gpu.last_clock_lock_request()
+        except Exception:
+            requested = None
+        if (isinstance(requested, (tuple, list)) and len(requested) == 2
+                and all(type(value) is int and value > 0 for value in requested)
+                and requested[0] <= requested[1]):
+            state.update(lo=requested[0], hi=requested[1], verified=True)
+            for tag, value in zip(("lock_min", "lock_max"), requested):
+                if dpg.does_item_exist(tag):
+                    dpg.set_value(tag, value)
+        self.set_lock_state(state)
 
     def release_lock(self):
         """The ONE release path - Ctrl+H routes here too. Sharing the code is
@@ -3339,9 +3400,10 @@ class Druta:
 
         Printed as well as logged: no frame renders after the loop exits, so the
         log widget is written for consistency and never appears on screen."""
-        if not self._clk_lock:
+        if not self._clk_lock and not self.vf_recovery_pending():
             return
-        what = self.LOCK_NAME[self._clk_lock["kind"]]
+        what = (self.LOCK_NAME[self._clk_lock["kind"]] if self._clk_lock
+                else "pending V/F lock recovery")
         ok, m = self.release_current()
         note = f"exit: releasing the {what} this app took - {m}"
         print(note)
@@ -3370,10 +3432,9 @@ class Druta:
         if not self.handover(self.LOCK_NVML):
             return
         ok, m = self.gpu.lock_gpu_clocks(gmax, gmax)
-        self.report((ok, m))
         if ok:
-            self.set_lock_state({"kind": self.LOCK_NVML,
-                                 "lo": gmax, "hi": gmax})
+            self.record_clock_lock()
+        self.report((ok, m))
 
     def set_lock_state(self, state):
         """Record what is holding the card now, and redraw both indicators.
@@ -3387,14 +3448,20 @@ class Druta:
         Release applies, and the wrong one succeeds without doing anything."""
         self._clk_lock = state
         held = state if state and state["kind"] == self.LOCK_VF else None
+        uncertain = bool(held and not held.get("verified", True))
         # drawn at the voltage the card is really ON, not the one requested:
         # the line is the only place the plot shows the hold, so it has to land
         # on the point the rail settled at (see hold_point)
         if dpg.does_item_exist("vf_holdline"):
-            dpg.set_value("vf_holdline", [[held["got_mv"]] if held else []])
+            dpg.set_value("vf_holdline", [[held["got_mv"]] if held and not uncertain else []])
         if not dpg.does_item_exist("hold_info"):
             return
-        if held:
+        if uncertain:
+            txt = (("V/F HOLD RECOVERY REQUIRED" if held.get("recovery") else
+                    "V/F HOLD readback unavailable")
+                   + f"  •  requested {held['req_mv']:.2f} mV; current state is unconfirmed"
+                   + "  •  Release retries cleanup")
+        elif held:
             exact = held["got_idx"] == held["idx"]
             txt = (f"HOLD  V/F point lock on domain {held['domain']}  •  "
                    + (f"point {held['idx']} @ {held['got_mv']:.2f} mV, "
@@ -3410,14 +3477,17 @@ class Druta:
                     "HOLD  legacy P0 request remains after failed verification / release")
                    + "  •  " + self.legacy_p0_measurement()
                    + "  •  Release P0 drops the hold")
+        elif state and not state.get("verified", True):
+            txt = ("GPU clock lock accepted; its submitted range is unavailable"
+                   "  •  Release retries cleanup")
         elif state:
-            txt = (f"clock locked to [{state['lo']}..{state['hi']}] MHz from the "
+            txt = (f"clock lock requested at [{state['lo']}..{state['hi']}] MHz from the "
                    f"Clocks menu (NVML locked clocks) - no V/F point is held")
         else:
             txt = ""
         dpg.set_value("hold_info", txt)
         dpg.configure_item("hold_info",
-                           color=GOOD if (held and held["got_idx"] == held["idx"])
+                           color=GOOD if (held and not uncertain and held["got_idx"] == held["idx"])
                            else WARN)
 
     def reset_all(self):
@@ -4804,17 +4874,52 @@ class Druta:
         req_uv = int(round(req_mv * 1000))
         if not self.handover(self.LOCK_VF):
             return
-        ok, m = self.gpu.set_vf_lock(req_uv)
+        previous = dict(self._clk_lock) if self._clk_lock else None
+        owned_domain = previous.get("domain") if previous else None
+        try:
+            current, error = self.gpu.read_vf_lock_status(domain=owned_domain)
+        except Exception as exc:
+            current, error = None, str(exc)
+        if error:
+            self.log(f"hold: cannot choose the current lock domain: {error}", False)
+            return
+        domain = (owned_domain if owned_domain is not None else
+                  current["domain"] if current else VF_LOCK_DOMAIN)
+        try:
+            ok, m = self.gpu.set_vf_lock(req_uv, domain=domain)
+        except Exception as exc:
+            ok, m = False, f"V/F hold failed: {exc}"
         if not ok:
+            if self.vf_recovery_pending():
+                self.set_lock_state({"kind": self.LOCK_VF, "verified": False,
+                                     "recovery": True, "req_mv": req_mv,
+                                     "domain": domain,
+                                     "previous_lock": previous})
             self.log(m, False)
             return
         # the driver echoes the REQUEST back, so this read-back proves only
         # that the lock is ours and still in force - which is the thing worth
         # proving on a machine where another tuner may be re-asserting its own
-        st = self.gpu.read_vf_lock()
+        try:
+            st, error = self.gpu.read_vf_lock_status(domain=domain)
+        except Exception as exc:
+            st, error = None, str(exc)
+        if error:
+            # The setter confirmed the hold. Losing the next observation is
+            # not a release: keep ownership so Release/exit still cleans it up.
+            self.set_lock_state({"kind": self.LOCK_VF, "verified": False,
+                                 "req_mv": req_mv, "domain": domain})
+            self.log(f"hold accepted, but its current state could not be read: {error}. "
+                     "Ownership is retained for Release/exit.", False)
+            return
         if st is None:
             self.log("hold: the write was accepted but the card now reports no "
                      "V/F lock - something else took it back", False)
+            self.set_lock_state(None)
+            return
+        if st["volt_uV"] != req_uv:
+            self.log("hold: another request replaced this window's V/F hold; "
+                     "its ownership is no longer claimed", False)
             self.set_lock_state(None)
             return
         # Where the card actually ends up is derived from the curve, because
@@ -6102,9 +6207,10 @@ deliberately does not put behind a button."""
         for tag, val in (("sl_core", d.get("core_off")),
                          ("sl_mem", moff / mscale
                           if isinstance(moff, (int, float)) else None),
-                         ("sl_pl", (d.get("pl_now_mw") or 0) // 1000 or None)):
+                         ("sl_pl", d["pl_requested_mw"] / 1000
+                          if d.get("pl_requested_mw") is not None else None)):
             if val is not None and dpg.does_item_exist(tag):
-                dpg.set_value(tag, val if tag == "sl_mem" else int(val))
+                dpg.set_value(tag, val if tag in ("sl_mem", "sl_pl") else int(val))
         vb = self.gpu.read_voltage_boost()
         if vb is not None and dpg.does_item_exist("sl_volt"):
             dpg.set_value("sl_volt", max(0, min(100, int(vb))))
@@ -7227,6 +7333,8 @@ deliberately does not put behind a button."""
         """Recheck write permission and the live clock band at the commit boundary."""
         if not self.guard():
             return False, "controls are locked or another operation owns the card"
+        if not timings.known_timing_layout(getattr(getattr(self, "_tim", None), "codename", None)):
+            return False, "the timing register layout is unknown; no timing write"
         floor = getattr(getattr(self, "_tim", None), "band_floor", None)
         if (isinstance(floor, bool) or not isinstance(floor, (int, float))
                 or not math.isfinite(floor) or floor <= 0):
@@ -7263,6 +7371,10 @@ deliberately does not put behind a button."""
         code, boot0 = timingwrite.backup_describes(path)
         if code is None:
             dpg.set_value("tw_result", f"no stock backup for this card at {path}")
+            dpg.configure_item("tw_result", color=BAD)
+            return
+        if not timings.known_timing_layout(code):
+            dpg.set_value("tw_result", f"restore refused: unknown timing register layout {code}")
             dpg.configure_item("tw_result", color=BAD)
             return
         ok, out = timingwrite.restore(path, self.gpu.slot())
@@ -7470,6 +7582,9 @@ deliberately does not put behind a button."""
         than by blocking, because an induce can hold the card for 25 s and
         refusing to switch for that long would be worse than dropping its
         result."""
+        if getattr(self, "_clk_lock", None) or self.vf_recovery_pending():
+            self.log("release the current card's hold or pending V/F recovery before switching", False)
+            return False
         if getattr(self, "_profile_pending", None) or getattr(self, "_i2c_busy", False):
             self.log("wait for I2C/profile loading to finish before switching cards", False)
             return False
@@ -7896,7 +8011,8 @@ deliberately does not put behind a button."""
                      "GPU load", None)
             return False
         if self._clk_lock and self._clk_lock.get("kind") == self.LOCK_VF:
-            return True                      # already holding; nothing to do
+            return (self._clk_lock.get("verified", True)
+                    and not self.vf_recovery_pending())
         try:
             self.hold_cap_point(dpg.get_value("vcap"))
         except Exception as e:                                  # noqa: BLE001
@@ -7904,7 +8020,9 @@ deliberately does not put behind a button."""
                      f"to a GPU load", None)
             return False
         return bool(self._clk_lock
-                    and self._clk_lock.get("kind") == self.LOCK_VF)
+                    and self._clk_lock.get("kind") == self.LOCK_VF
+                    and self._clk_lock.get("verified", True)
+                    and not self.vf_recovery_pending())
 
     # How long to give the card to climb into its top memory band after the
     # V/F point lock goes on. MEASURED: it arrives in well under a second on

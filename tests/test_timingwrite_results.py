@@ -131,7 +131,7 @@ class TimingWriteResultsTests(unittest.TestCase):
 
     def test_outstanding_warnings_refuse_without_force(self):
         guard = Mock()
-        (_, rows), run = self.apply([("RC=45", 0), (DRY_RUN + "\n  range warning", 1)],
+        (_, rows), run = self.apply([("RC=45", 0), (DRY_RUN + "\n  range warning", 0)],
                                    before_commit=guard)
         self.assertEqual(rows[0].outcome, tw.TOOL_REFUSED)
         self.assertEqual(run.call_count, 2)
@@ -139,7 +139,7 @@ class TimingWriteResultsTests(unittest.TestCase):
 
     def test_force_keeps_the_precommit_guard(self):
         guard = Mock(return_value=(False, "controls locked"))
-        (_, rows), run = self.apply([("RC=45", 0), (DRY_RUN + "\n  range warning", 1)],
+        (_, rows), run = self.apply([("RC=45", 0), (DRY_RUN + "\n  range warning", 0)],
                                    force=True, before_commit=guard)
         guard.assert_called_once_with()
         self.assertEqual(rows[0].outcome, tw.TOOL_REFUSED)

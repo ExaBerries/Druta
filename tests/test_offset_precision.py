@@ -49,6 +49,67 @@ def modern_gpu():
 
 
 class MemoryOffsetPrecision(unittest.TestCase):
+    def blackwell_gpu(self):
+        gpu, driver = modern_gpu()
+        gpu.static.update(name="NVIDIA GeForce RTX 5080", driver="580.97",
+                          vbios="98.03.3b.c0.6f", mem_div=8)
+        gpu.nvml.selected = {"devid": 0x2C02, "subsys": 2313031747}
+        return gpu, driver
+
+    def test_measured_blackwell_memory_grid_refuses_odd_requests_before_write(self):
+        for value in (0.0625, -0.0625, 12.5625, -12.5625):
+            with self.subTest(value=value):
+                gpu, driver = self.blackwell_gpu()
+                ok, message = gpu.set_clock_offset(2, value)
+                self.assertFalse(ok)
+                self.assertIn("multiples of 0.125", message)
+                self.assertEqual(driver.writes, [])
+
+    def test_measured_blackwell_memory_grid_accepts_exact_even_units(self):
+        for value, units in ((0, 0), (0.125, 2), (-0.125, -2),
+                             (12.5, 200), (-12.5, -200)):
+            with self.subTest(value=value):
+                gpu, driver = self.blackwell_gpu()
+                self.assertTrue(gpu.set_clock_offset(2, value)[0])
+                self.assertEqual(driver.writes, [(2, 0, units)])
+                self.assertEqual(driver.current, units)
+
+    def test_memory_grid_is_pure_metadata_and_restricted_to_measured_transport_identity(self):
+        gpu, _ = self.blackwell_gpu()
+        gpu.arch = Mock(side_effect=AssertionError("metadata lookup must not query hardware"))
+        self.assertEqual(gpu.memory_offset_step_units(), 2)
+        gpu.arch.assert_not_called()
+        for field, replacement in (("devid", 0x2C04), ("subsys", 0),
+                                    ("vbios", "98.03.3b.c0.70"), ("driver", "581.01")):
+            with self.subTest(field=field):
+                gpu, _ = self.blackwell_gpu()
+                target = gpu.nvml.selected if field in ("devid", "subsys") else gpu.static
+                target[field] = replacement
+                self.assertEqual(gpu.memory_offset_step_units(), 1)
+                self.assertTrue(gpu.set_clock_offset(2, 0.0625)[0])
+        gpu, _ = self.blackwell_gpu()
+        gpu.nvml.ok = False
+        self.assertEqual(gpu.memory_offset_step_units(), 1)
+        gpu, _ = self.blackwell_gpu()
+        gpu.nvml.has = lambda name: False
+        self.assertEqual(gpu.memory_offset_step_units(), 1)
+
+    def test_measured_blackwell_unknown_memory_type_keeps_reported_clock_units(self):
+        for request in (0.5, -0.5, 12.5, -12.5):
+            with self.subTest(request=request):
+                gpu, driver = self.blackwell_gpu()
+                gpu.static["mem_div"] = None
+                ok, message = gpu.set_clock_offset(2, request)
+                self.assertFalse(ok)
+                self.assertIn("multiples of 1 MHz eff", message)
+                self.assertEqual(driver.writes, [])
+        for request in (1, -1, 12, -12):
+            with self.subTest(request=request):
+                gpu, driver = self.blackwell_gpu()
+                gpu.static["mem_div"] = None
+                self.assertTrue(gpu.set_clock_offset(2, request)[0])
+                self.assertEqual(driver.writes, [(2, 0, request * 2)])
+
     def test_fractional_memory_offsets_use_exact_legacy_khz(self):
         for value, units in ((12.5, 100), (-12.5, -100), (0.125, 1),
                              (-0.125, -1), (0, 0), (-250, -2000), (750, 6000)):

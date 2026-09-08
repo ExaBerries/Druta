@@ -48,6 +48,7 @@ Same tool, same driver, same slot. So this module reports what happened; it does
 not promise a write will land.
 """
 import json
+import hashlib
 import os
 import re
 import subprocess
@@ -148,6 +149,42 @@ class Result:
 
 
 # ---- the single choke point ------------------------------------------------ #
+_PREVIEW_CONTRACTS = {}
+
+
+def _exe_fingerprint(exe):
+    stat = os.stat(exe)
+    # Windows ctime is creation time. A same-size copy preserving mtime can
+    # replace a legacy helper without changing any of the stat fields.
+    with open(exe, "rb") as handle:
+        digest = hashlib.file_digest(handle, "sha256").hexdigest()
+    return (os.path.normcase(os.path.realpath(exe)), stat.st_size,
+            stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino, digest)
+
+
+def _preview_flags(exe):
+    """Learn preview syntax from read-only help, never from a trial set."""
+    key = _exe_fingerprint(exe)
+    if key in _PREVIEW_CONTRACTS:
+        return _PREVIEW_CONTRACTS[key]
+    result = subprocess.run([exe, "--help"], capture_output=True, text=True,
+                            timeout=20, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if result.returncode != 0:
+        raise WriteError("cannot determine nvtune's preview contract: --help failed")
+    help_text = (result.stdout or "") + (result.stderr or "")
+    if re.search(r"^\s*(?:-\w,\s*)?--dry-run\b", help_text, re.M):
+        flags = ("--dry-run",)
+    elif ("Everything defaults to a dry run" in help_text
+          and "--commit is required to touch hardware" in help_text):
+        flags = ()
+    else:
+        raise WriteError("nvtune does not advertise a recognized preview contract; no set command sent")
+    if _exe_fingerprint(exe) != key:
+        raise WriteError("nvtune changed while its preview contract was being checked")
+    _PREVIEW_CONTRACTS[key] = flags
+    return flags
+
+
 def _run(args, override=None, timeout=90, slot=None):
     """Spawn nvtune. This is the ONLY place in Druta that may build an argv
     containing a writing subcommand.
@@ -178,6 +215,8 @@ def _run(args, override=None, timeout=90, slot=None):
     args = list(args)
     if not args:
         raise WriteError("refused: empty nvtune argv")
+    if args[0] in ("set", "apply") and "--commit" not in args and "--dry-run" not in args:
+        args.extend(_preview_flags(exe))
     # -d goes AFTER the subcommand. nvtune parses argv[1] as the command name,
     # so `nvtune -d SLOT set ...` exits with "unknown command '-d'" - which,
     # being a non-zero exit with no ops parsed, would have surfaced as a plain
@@ -213,6 +252,7 @@ def _parse(out):
                 and "applied and verified" not in s
                 and not s.startswith("reminder:")
                 and not _OP_RE.match(line) and not s.startswith("0000:")
+                and s != "dry run complete: no registers written"
                 and "stock values saved" not in s):
             warnings.append(s)
     return ops, warnings
@@ -248,9 +288,11 @@ def plan(assignments, slot, override=None):
     except (OSError, subprocess.SubprocessError, WriteError) as e:
         return Plan(assignments, [], [], "", ok=False, error=str(e))
     ops, warnings = _parse(out)
-    if rc != 0 and not ops:
+    # A warning-only preview exits successfully. Any nonzero status remains
+    # a failure even if a partial plan was printed first; force cannot fix it.
+    if rc != 0:
         return Plan(assignments, [], warnings, out, ok=False,
-                    error=out or f"nvtune exited {rc}")
+                    error=f"nvtune dry run exited {rc}: {out or 'no error text'}")
     return Plan(assignments, ops, warnings, out)
 
 
@@ -273,11 +315,14 @@ def check(assignments, field_table, snapshot=None):
             problems.append(f"{name}: lives in {f.register}, whose offset is "
                             f"INFERRED rather than observed - writing it means "
                             f"writing an address we have not confirmed")
-    if snapshot is not None and not getattr(snapshot, "perf_band", False):
-        problems.append(
-            "the card is not in its top memory band. Timings are selected per "
-            "band, so a write here edits the band the card is in NOW, which is "
-            "not the one you are tuning.")
+    if snapshot is not None:
+        if not timings.known_timing_layout(getattr(snapshot, "codename", None)):
+            problems.append("nvtune has no confirmed timing layout for this chip; raw register captures cannot authorize writes")
+        if not getattr(snapshot, "perf_band", False):
+            problems.append(
+                "the card is not in its top memory band. Timings are selected per "
+                "band, so a write here edits the band the card is in NOW, which is "
+                "not the one you are tuning.")
     return problems
 
 

@@ -87,8 +87,8 @@ class VoltagePrecisionUiTests(FakeUiTest):
             self.app.slider_row(key, key, 0, 1500, 12.5, Mock())
         floats = {call.kwargs["tag"] for call in self.ui.add_input_float.call_args_list}
         ints = {call.kwargs["tag"] for call in self.ui.add_input_int.call_args_list}
-        self.assertEqual(floats, {"in_rail", "in_i2crail", "in_vlim_rel", "in_vlim1_alt"})
-        self.assertEqual(ints, {"in_core", "in_volt", "in_pl", "in_fan"})
+        self.assertEqual(floats, {"in_rail", "in_i2crail", "in_vlim_rel", "in_vlim1_alt", "in_pl"})
+        self.assertEqual(ints, {"in_core", "in_volt", "in_fan"})
 
     def test_fractional_limits_preserve_all_fields_on_both_rails_through_real_setter(self):
         self.app.gpu = fake_gpu("blackwell")

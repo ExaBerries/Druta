@@ -90,6 +90,16 @@ It currently lives under taskbar > Device > `Shunt mod corrected power`. Simply 
 
 # III. How to load `nvtune`?
 
+The power-limit knob and tune profiles preserve the configured request,
+including fractional watts. Enforced power telemetry can lag behind that
+request and remains a separate live reading.
+
+On the measured RTX 5080 / VBIOS 98.03.3b.c0.6f / driver 580.97, memory-offset
+Apply snaps half-MHz requests toward zero to the whole-MHz values the driver
+can retain. Other cards keep their existing offset precision. This board's
+memory command-clock divisor remains unknown; no timing-nanosecond conversion
+is inferred from its reported memory clock.
+
 `nvtune` is shipped by Seby. You must enable test signing for it to work on your machine. Druta can hunt for it on your desktop and will load it automatically. Druta is an offline tool. It does not download or upload anything.  
 
 You should almost always use `Read memory timings (will hold P0)` (blue) because changing P states can change timings, and reading/changing memory timing when the card is idling at P16 is useless for your endeavors. `read timing` is for sanity checks after you have applied your changes. 
@@ -102,6 +112,13 @@ card returns to idle. The GTX 745 must reach its 900 MHz memory band; 405 MHz
 idle does not qualify. Negative memory offsets are accounted for when checking
 the band. A failed helper or unreadable register is reported as a failure, not
 as proof that the hardware rejected the value.
+
+If the helper reports an unknown chip layout, Druta retains raw register
+captures and disables decoded timing Apply and Restore. RTX 5080 reported
+`UNKNOWN_1B3` with the helper tested here. Druta also checks the helper's help
+text before previewing a change: newer helpers require explicit `--dry-run`,
+while the recognized legacy convention requires `--commit` for writes.
+Unrecognized command conventions refuse the preview.
 
 Once `nvtune` EXE is loaded, these buttons move up to the `Device` menus on the taskbar. 
 
