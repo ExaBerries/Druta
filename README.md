@@ -571,6 +571,17 @@ live voltage in two repeated cycles on each card. The former claim here that
 this cap could not be raised was disproved by that measurement. See
 [the per-rail findings](VOLTAGE-RAILS-TITAN.md) for exact conditions and scope.
 
+## Contributing I2C controller support
+
+Start with the [I2C contribution workflow](i2c/CONTRIBUTING.md),
+[recipe and adapter reference](i2c/PROFILES.md), and
+[I2C PR template](.github/PULL_REQUEST_TEMPLATE/i2c_profile.md).
+Kepler NCP4206 and MP2888A discovery scan actual buses without board-ID filters.
+Another board with one of these controllers usually needs discovery and
+Verify/restore evidence, rather than a duplicate TOML profile. Druta lists
+matching candidates by port/address; an ambiguous scan requires selection.
+Verify performs bounded writes and must confirm restoration before Apply.
+
 ## Profiles and undo points
 
 Named profiles snapshot both offsets, the power limit, the voltage boost, the
@@ -584,8 +595,9 @@ list names these values, and loading reports each control's result. Rails
 that Druta has not confirmed writable remain unavailable; MSVDD's unconfirmed
 voltage-offset field is not replayed.
 
-I2C profiles save the offset plus the regulator identity and a fingerprint of
-its complete local TOML recipe, including its limits. They do not save or replay
+I2C tuning profiles save the controller state (MP2888A offset or NCP4206
+absolute target/Auto), its port/address, and a fingerprint of the bound register
+recipe, including its limits. They do not save or replay
 arbitrary VRM registers or replace that recipe's whitelist/envelope. Loading
 restores the saved XOC mode and enables the required rail controls. Values that
 need XOC (including above-normal carryover left after unticking XOC and a nonzero
