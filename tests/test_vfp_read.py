@@ -22,6 +22,8 @@ class CurveAPI:
         self.gpu = object()
         self.kind = kind
         self.incomplete = False
+        self.core_cap_khz = None
+        self.core_offset_khz = 0
         self.boost_reads = 0
         self.capacity = 84 if kind == "pascal" else 128
         self.gpu_count = 80 if kind == "pascal" else 128
@@ -52,6 +54,8 @@ class CurveAPI:
                     entry.volt_uV = 450000 + index * 10000
                     entry.freq_kHz = 2 * round(
                         139000 + (1911000 - 139000) * index / 79)
+                    if self.core_cap_khz is not None:
+                        entry.freq_kHz = min(entry.freq_kHz, self.core_cap_khz)
                 else:
                     entry.u0 = 1
                     entry.volt_uV = 550000 + (index - 80) * 62500
@@ -60,7 +64,7 @@ class CurveAPI:
             else:
                 entry.volt_uV = 450000 + index * 6250
                 entry.freq_kHz = round(
-                    360000 + (2160000 - 360000) * index / 127)
+                    360000 + (2160000 - 360000) * index / 127) + self.core_offset_khz
         return 0
 
     def BoostTableGet(self, handle, ptr):
@@ -85,6 +89,53 @@ def fake_gpu(kind="pascal"):
 
 
 class VfpReadTests(unittest.TestCase):
+    def test_known_turing_keeps_direct_units_above_the_old_scale_threshold(self):
+        for maximum in (2160, None):
+            with self.subTest(gfx_max=maximum):
+                gpu = fake_gpu("turing")
+                gpu.arch = Mock(return_value=GPU.ARCH_TURING)
+                gpu.static["gfx_max"] = maximum
+                gpu.nvapi.core_offset_khz = 1_200_000
+                points, error = gpu.read_vf_curve()
+                self.assertIsNone(error)
+                self.assertEqual(gpu.vfp_layout().freq_div, 1)
+                self.assertEqual(len(points), 128)
+                self.assertEqual(max(p["freq_mhz"] for p in points), 3360)
+                self.assertEqual(points[-1]["delta_khz"], 127 * 7500)
+
+    def test_unknown_architecture_retains_original_scale_inference(self):
+        gpu = fake_gpu("turing")
+        gpu.nvapi.core_offset_khz = 1_200_000
+        self.assertIsNone(gpu.arch())
+        self.assertEqual(gpu.vfp_layout().freq_div, 2)
+
+    def test_fresh_pascal_layout_keeps_doubled_units_for_a_lowered_curve(self):
+        for maximum in (1911, None):
+            with self.subTest(gfx_max=maximum):
+                gpu = fake_gpu()
+                gpu.arch = Mock(return_value=GPU.ARCH_PASCAL)
+                gpu.static["gfx_max"] = maximum
+                # A persisted 1000 MHz cap is below the former scale heuristic.
+                gpu.nvapi.core_cap_khz = 2_000_000
+                points, error = gpu.read_vf_curve()
+                self.assertIsNone(error)
+                layout = gpu.vfp_layout()
+                self.assertEqual((layout.n_entries, layout.n_gpu, layout.freq_div),
+                                 (84, 80, 2))
+                self.assertEqual(layout.other_idx, list(range(80, 84)))
+                self.assertEqual(max(p["freq_mhz"] for p in points), 1000)
+                self.assertEqual(points[0]["freq_mhz"], 139)
+                self.assertEqual(points[-1]["delta_khz"], 79 * 7500)
+
+    def test_pascal_scale_without_max_clock_does_not_require_a_lowered_curve(self):
+        gpu = fake_gpu()
+        gpu.arch = Mock(return_value=GPU.ARCH_PASCAL)
+        gpu.static.pop("gfx_max")
+        points, error = gpu.read_vf_curve()
+        self.assertIsNone(error)
+        self.assertEqual(gpu.vfp_layout().freq_div, 2)
+        self.assertEqual(max(p["freq_mhz"] for p in points), 1911)
+
     def test_backend_rephase_uses_pascal_raw_delta_units(self):
         gpu = fake_gpu()
         self.assertIsNotNone(gpu.vfp_layout())

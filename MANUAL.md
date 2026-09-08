@@ -26,6 +26,13 @@ the complete saved payload before changing any control. Fractional memory
 offsets are preserved in the driver's supported units, and replaying an
 already-correct clock-domain offset is a successful no-op.
 
+Voltage fields preserve fractional millivolts when read, edited and reapplied.
+For example, 12.5 mV NVVDD offset and a 1068.75 mV reliability limit keep those
+values in the input boxes. Driver voltage requests use integer microvolts;
+I2C requests use the identified controller's step. Core offsets snap to the
+card's physical frequency bin on Apply, and the displayed result can be
+reapplied without moving to another bin.
+
 Choose **Load at startup** beside a named profile to apply a saved copy at
 Windows sign-in. Configure this while running Druta as administrator. Selecting
 it again updates that copy; **Disable startup loading** turns it off. The card,
@@ -87,7 +94,14 @@ It currently lives under taskbar > Device > `Shunt mod corrected power`. Simply 
 
 You should almost always use `Read memory timings (will hold P0)` (blue) because changing P states can change timings, and reading/changing memory timing when the card is idling at P16 is useless for your endeavors. `read timing` is for sanity checks after you have applied your changes. 
 
-`Load nvtune` and `Enable Test Signing` are conspicuously displayed when nvtune isn't loaded.  
+`Load nvtune` and `Enable Test Signing` are conspicuously displayed when nvtune isn't loaded.
+
+Timing Apply requires Unlock controls and a fresh confirmed performance band
+immediately before writing. An old capture cannot authorize a write after the
+card returns to idle. The GTX 745 must reach its 900 MHz memory band; 405 MHz
+idle does not qualify. Negative memory offsets are accounted for when checking
+the band. A failed helper or unreadable register is reported as a failure, not
+as proof that the hardware rejected the value.
 
 Once `nvtune` EXE is loaded, these buttons move up to the `Device` menus on the taskbar. 
 

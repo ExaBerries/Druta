@@ -3904,7 +3904,10 @@ class GPU:
             return False, f"V/F lock release failed (status {st}) - needs admin"
         # read back: the release is the one call whose failure would leave the
         # card pinned with nothing on screen saying so
-        if self.read_vf_lock() is not None:
+        back = self._vf_lock_read_raw()
+        if back is None:
+            return False, "V/F lock release was sent, but the verification read failed"
+        if any(e.lockMode == VF_LOCK_MODE_POINT for e in self._vf_lock_entries(back)):
             return False, ("V/F lock release returned OK but the card still "
                            "reports a lock - another tool is re-asserting it")
         return True, (f"V/F point lock released "
@@ -5022,10 +5025,10 @@ class GPU:
            550.00, and that collapse is the boundary. Matching frequencies
            against mem_clocks instead would misfire the moment a GPU point
            happens to sit at 405 or 810 MHz, which is entirely possible.
-        3. WHAT SCALE THE FREQUENCY IS IN - compare the top GPU row against the
-           driver's own gfx_max. GP102 reports GPC2CLK, twice the graphics
-           clock: raw, 60 of its 80 points claim to be above the card's maximum,
-           which cannot be true. Halved, none are.
+        3. WHAT SCALE THE FREQUENCY IS IN - the measured Pascal/Turing formats
+           use doubled/direct graphics clocks respectively, regardless of a
+           tune. For an unmapped architecture, compare the top GPU row against
+           the driver's own gfx_max as the original layout probe did.
 
         Returns None if the curve APIs are unavailable or nothing answers."""
         if not self.vf_curve_applicable():
@@ -5067,11 +5070,12 @@ class GPU:
                 "press Read curve to retry")
             return None
 
-        freq_div, gfx_max = 1, self.static.get("gfx_max")
+        gfx_max = self.static.get("gfx_max")
         gset = set(gpu_idx)
         top_raw = max((f for i, _mv, f in rows if i in gset), default=0) / 1000.0
-        if gfx_max and top_raw > gfx_max * 1.5:
-            freq_div = 2
+        freq_div = {self.ARCH_PASCAL: 2, self.ARCH_TURING: 1}.get(self.arch())
+        if freq_div is None:
+            freq_div = 2 if gfx_max and top_raw > gfx_max * 1.5 else 1
 
         mem = set(self.static.get("mem_clocks") or ())
         n_mem = sum(1 for i, _mv, f in rows
@@ -5798,20 +5802,29 @@ class GPU:
         # Only emitted where the control block answers and the domain is
         # actually carrying something, so the ordinary reset does not grow a
         # step that always says "nothing to do".
-        if self.clkdom_ok():
+        layout = self.clkdom_layout() if self.clkdom_ok() else None
+        if layout is not None:
             rows, err = self.read_clk_domain_offsets()
-            for d in sorted((rows or {})):
-                if rows[d]["freq_khz"]:
-                    steps.append(ResetStep(
-                        f"{CLKDOM_NAMES.get(d, f'domain {d}')} offset",
-                        self.set_clk_domain_offset(d, 0)))
+            if err or not rows:
+                steps.append(ResetStep("clock-domain offsets", (False,
+                    f"clock-domain offsets were not reset: {err or 'current values unreadable'}")))
+            else:
+                for d in sorted(rows):
+                    if rows[d]["freq_khz"]:
+                        steps.append(ResetStep(
+                            f"{CLKDOM_NAMES.get(d, f'domain {d}')} offset",
+                            self.set_clk_domain_offset(d, 0)))
             # The rail offset is a THIRD thing again - not a clock offset and
             # not the voltage boost - so it needs its own step or a reset would
             # leave the card carrying volts nothing on screen accounts for.
-            rail = self.read_rail_offset_mv(0)
-            if rail:
-                steps.append(ResetStep("core rail offset",
-                                       self.set_rail_offset_mv(0, 0)))
+            if layout.nvvdd_uv is not None:
+                rail = self.read_rail_offset_mv(0)
+                if rail is None:
+                    steps.append(ResetStep("core rail offset", (False,
+                        "core rail offset was not reset: current value unreadable")))
+                elif rail:
+                    steps.append(ResetStep("core rail offset",
+                                           self.set_rail_offset_mv(0, 0)))
         # The rail LIMITS are a fourth mechanism, and they outlive the app: they
         # are driver state that a reboot does not clear and that the display
         # reset does not touch. Leaving them out would make Druta exactly as
@@ -5831,9 +5844,13 @@ class GPU:
         #
         # Compare only known card-specific defaults. Readable telemetry on
         # an unvalidated board must never dispatch a Blackwell-default reset.
-        supported = self.volt_rail_limits_supported()
-        cur = self.read_volt_rail_limits() if supported else None
-        poweron = self._volt_rail_profile()["poweron"] if supported else {}
+        profile = self._volt_rail_profile()
+        cur = self.read_volt_rail_limits() if profile is not None else None
+        poweron = profile["poweron"] if profile is not None else {}
+        if profile is not None and (cur is None or set(cur) != set(poweron)):
+            steps.append(ResetStep("rail limits", (False,
+                "rail limits were not reset: current values unreadable or incomplete")))
+            cur = None
         off_stock = False
         for rail, fields in (cur or {}).items():
             want = poweron.get(rail)
@@ -5859,10 +5876,10 @@ class GPU:
             steps.append(ResetStep(self.P0_LOCK_STEP, self.release_legacy_p0()))
         # The V/F point lock is a DIFFERENT mechanism: reset_gpu_clocks does not
         # touch it, so a reset that stopped at the step above would report a
-        # clean card while this one still pinned it. Appended only when one is
-        # actually held, so the ordinary reset does not grow a step that always
-        # says "nothing was locked".
-        if self._vf_lock_available() and self.read_vf_lock() is not None:
+        # clean card while this one still pinned it. clear_vf_lock distinguishes
+        # an unreadable buffer from a validated unlocked one; read_vf_lock
+        # alone returns None for both cases.
+        if self._vf_lock_available():
             steps.append(ResetStep(self.VF_LOCK_STEP, self.clear_vf_lock()))
         steps.append(ResetStep("fan", self.reset_fan()))
         if self.nvapi.ok and self.nvapi.VoltCtrlGet and self.nvapi.VoltCtrlSet:

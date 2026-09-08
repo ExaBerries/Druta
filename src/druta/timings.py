@@ -71,6 +71,7 @@ stub in place of the card.
 import ctypes
 import itertools
 import json
+import math
 import os
 import re
 import subprocess
@@ -820,6 +821,51 @@ class Reading:
         return self.field.name
 
 
+def _finite_number(value):
+    try:
+        return type(value) in (int, float) and math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def performance_band_floor(mem_states, codename=""):
+    """Nominal top-band floor, restricted to the clock pairs actually measured.
+
+    GP102 and TU102 expose nearby P2/P0 clocks (up to 200 reported MHz apart)
+    whose timing registers were compared and matched. That observation does
+    not make the second-highest clock a performance band on every card:
+    GM107's two clocks are idle 405 and P0 900. Unknown chips or separated
+    clocks use only the highest state. Normalize duplicates/order first.
+    """
+    if not mem_states or any(not _finite_number(v) or v <= 0 for v in mem_states):
+        return None
+    states = sorted(set(mem_states))
+    if (str(codename).strip().upper() in ("GP102", "TU102") and len(states) > 1
+            and states[-1] - states[-2] <= 200):
+        return states[-2]
+    return states[-1]
+
+
+def in_performance_band(memory, pstate, mem_states, codename="", mem_offset=0.0):
+    """True/False/None from one clock/state read, also used at write commit.
+
+    mem_offset is in REPORTED MHz (half the API's mem_off), not true MHz.
+    Undo that offset before comparing states; an underclocked P0/P2 remains
+    the same band. Known P0/P2 is required so a large positive offset cannot
+    turn an idle-state reading into permission to write. The five-MHz margin
+    matches matched_state's allowance for integer clock/offset quantization.
+    """
+    if type(pstate) is not int:
+        return None
+    if pstate not in (0, 2):
+        return False
+    floor = performance_band_floor(mem_states, codename)
+    if (floor is None or not _finite_number(memory) or memory <= 0
+            or not _finite_number(mem_offset)):
+        return None
+    return memory - mem_offset >= floor - 5
+
+
 @dataclass
 class Snapshot:
     ok: bool = False
@@ -851,7 +897,7 @@ class Snapshot:
     pstate_after: int = None
     # applied memory offset in REPORTED units, so a reading can be traced back
     # to the enumerated state it sits on (7228 - 427 = 6801)
-    mem_offset: float = 0.0
+    mem_offset: float = None
     warnings: list = _dc_field(default_factory=list)
     json_path: str = ""
     wall: float = 0.0            # time.time() of the capture
@@ -923,17 +969,12 @@ class Snapshot:
         memory actually up there, so both the p-state and the clock must
         qualify, on BOTH bracketing reads. A capture that started at 810 and
         ended at 7428 straddled a reclock and is a P0 reading of nothing."""
-        top = self.mem_top
-        seen = [v for v in (self.mem_before, self.mem_after) if v is not None]
-        ps = self.pstate
-        if not seen or not top:
-            return None
-        clock_ok = min(seen) >= top
-        if ps is None:
-            # no p-state to check against: fall back to the clock, and
-            # state_headline says the classification is unverified
-            return clock_ok
-        return clock_ok and ps == 0
+        if any(type(p) is int and p != 0 for p in (self.pstate_before, self.pstate_after)):
+            return False
+        checks = [in_performance_band(mem, ps, self.mem_states, mem_offset=self.mem_offset)
+                  for mem, ps in ((self.mem_before, self.pstate_before),
+                                  (self.mem_after, self.pstate_after))]
+        return False if False in checks else None if None in checks else True
 
     @property
     def matched_state(self):
@@ -944,19 +985,16 @@ class Snapshot:
         Tolerant by a few units on purpose - the offset is carried in
         DDR-doubled NVML units (856, i.e. 428 reported) while the delta that
         actually lands is 427, so an equality test would match nothing."""
-        if not self.mem_states or self.mem_nvml is None:
+        if not self.mem_states or self.mem_nvml is None or not _finite_number(self.mem_offset):
             return None
-        base = self.mem_nvml - (self.mem_offset or 0)
+        base = self.mem_nvml - self.mem_offset
         best = min(self.mem_states, key=lambda s: abs(s - base))
         return best if abs(best - base) <= 5 else None
 
     @property
     def band_floor(self):
-        """The bottom of the TOP CLOCK BAND - the second-highest enumerated
-        state. Captures at or above this read the same timing registers."""
-        if len(self.mem_states) > 1:
-            return self.mem_states[-2]
-        return self.mem_top
+        """Nominal floor from the measured chip-specific clock-band mapping."""
+        return performance_band_floor(self.mem_states, self.codename)
 
     @property
     def perf_band(self):
@@ -974,15 +1012,16 @@ class Snapshot:
         far slacker values. That is the distinction this property draws, and
         it is the one the loud warning fires on.
 
-        Scoped to READING. If a write phase ever happens, a bandwidth
-        benchmark has to run in the state being reasoned about - measuring
-        throughput at P2 and reporting it as a P0 result is a different error
-        that this identity does not excuse."""
-        floor = self.band_floor
-        seen = [v for v in (self.mem_before, self.mem_after) if v is not None]
-        if not floor or not seen:
-            return None
-        return min(seen) >= floor
+        The P2/P0 equivalence is limited to the measured GP102/TU102 nearby
+        clock pairs. Unknown chips use their highest enumerated state. Both
+        bracketing reads must report P0/P2, with the applied offset removed;
+        unknown state remains unverified. A writer also needs a fresh check
+        immediately before commit, since this snapshot can become stale.
+        """
+        checks = [in_performance_band(mem, ps, self.mem_states, self.codename, self.mem_offset)
+                  for mem, ps in ((self.mem_before, self.pstate_before),
+                                  (self.mem_after, self.pstate_after))]
+        return False if False in checks else None if None in checks else True
 
     @property
     def above_enumerated(self):
@@ -1002,8 +1041,8 @@ class Snapshot:
         in - so it is said in full, at the top. A P2 capture is not that error:
         its registers are bit-identical to P0's (see perf_band)."""
         if self.perf_band is None:
-            return ("MEMORY STATE UNKNOWN: the driver did not enumerate its "
-                    "supported memory clocks, so this capture cannot be "
+            return ("MEMORY STATE UNKNOWN: a memory clock, offset, performance "
+                    "state or supported clock list is unavailable, so this capture cannot be "
                     "placed in a clock band. Treat it as unverified.")
         ps = self.pstate
         where = (f"NVML {self.mem_nvml}"
@@ -1026,7 +1065,8 @@ class Snapshot:
             return (f"IDLE STATE ({where}){moved} - says NOTHING about "
                     f"performance. Hold the card in its top band with Ctrl+H "
                     f"on the V/F curve, or capture under load with 'Induce "
-                    f"P-state', at or above {self.band_floor}.")
+                    f"P-state', in P0/P2 at or above nominal {self.band_floor} MHz "
+                    f"after removing the memory offset.")
         if self.at_p0:
             # the band does not need the p-state, but the P0 LABEL does
             unverified = ("" if ps is not None else
@@ -1125,10 +1165,10 @@ def snapshot(gpu=None, override=None, timeout=20.0):
             try:
                 # NVML mem-offset units are DDR-doubled, so the delta that
                 # lands on the REPORTED clock is half of it (856 -> 428)
-                off = gpu.read().get("mem_off") or 0
-                snap.mem_offset = off / 2.0
+                off = gpu.read().get("mem_off")
+                snap.mem_offset = off / 2.0 if _finite_number(off) else None
             except Exception:
-                snap.mem_offset = 0.0
+                snap.mem_offset = None
         path = os.path.join(output_dir(),
                             f"snapshot-{next(_SEQ):03d}-"
                             f"{time.strftime('%H%M%S')}.json")
@@ -1248,6 +1288,8 @@ def snapshot(gpu=None, override=None, timeout=20.0):
                 f"memory type '{snap.mem_type or 'unknown'}' has no known "
                 f"true-clock divisor, so no cycle count here can be converted "
                 f"to nanoseconds")
+        if snap.mem_offset is None:
+            snap.warnings.append("memory offset was not readable; the performance band is unverified")
         snap.ok = True
         return snap
     except TimingsError as e:

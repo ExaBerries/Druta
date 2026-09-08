@@ -248,10 +248,10 @@ class ProfileFlow(unittest.TestCase):
     @patch("druta.druta.dpg.does_item_exist", return_value=True)
     def test_rail_and_additional_memory_widgets_follow_live_readback(self, _exists, value):
         Druta.sync_profile_rail_sliders(self.app)
-        value.assert_any_call("sl_rail", 12)
-        value.assert_any_call("in_rail", 12)
+        value.assert_any_call("sl_rail", 12.5)
+        value.assert_any_call("in_rail", 12.5)
         value.assert_any_call("sl_memdom", 200)
-        value.assert_any_call("sl_i2crail", 19)
+        value.assert_any_call("sl_i2crail", 18.75)
 
 
 if __name__ == "__main__":

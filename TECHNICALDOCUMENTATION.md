@@ -1224,8 +1224,14 @@ the load is skipped entirely: opening a CUDA context on a P0 card pulls it
 
 Four guards sit in front of every write:
 
-1. **The card must be in its top memory band.** Timings are per band, so a write
-   in any other state edits a band you are not tuning.
+1. **Controls must be unlocked and the current card must be in its top memory
+   band.** Apply checks fresh P0/P2 and offset-normalized memory-clock readings
+   before preparation and again immediately before commit. Missing state, clock
+   or offset refuses the write. Both reads bracketing a capture must qualify.
+   Only the measured GP102/TU102 nearby P2/P0 clock pairs share a band; other
+   chips use their highest enumerated clock. The GTX 745's [405, 900] clock list
+   therefore has a 900 MHz floor, with the same 5 MHz quantization allowance used
+   for matching reported clocks to enumerated states.
 2. **Range and structural refusals happen here, before nvtune is consulted.**
    Structural fields (training and phase fragments, with no "looser" direction)
    and fields in a register whose offset is only *inferred* get no input at all.
@@ -1246,6 +1252,12 @@ Outcomes are reported as four distinct states — **landed**, **dropped** (reach
 the hardware and was rejected), **refused** (nvtune declined; BAR0 never
 touched), **failed** — because conflating the middle two produces a confident
 wrong conclusion.
+
+A nonzero helper exit, timeout, missing pre-write value or missing post-write
+readback is **failed**, with the diagnostic retained. A partial commit can have
+actual readback values and still be failed. Missing readback is never proof of a
+hardware rejection. `force` only overrides nvtune's warning refusal; it does not
+override the current-state or Unlock checks.
 
 > **Measured: GP102 accepts these writes; TU102 rejects every one of them at the
 > hardware.** Same tool, same driver, same slot. `FAW 24→25` on GP102 applied,

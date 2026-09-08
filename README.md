@@ -803,8 +803,14 @@ The CUDA memcpy load is the fallback when the hold cannot be taken, such as in c
 
 Timing writings are quaduply guarded:
 
-1. **The card must be in its top memory band.** Timings are per band, so a write
-   in any other state will be writing into garbage and will be auto-rejected.
+1. **Controls must be unlocked and the current card must be in its top memory
+   band.** Apply checks a fresh P0/P2 memory-clock reading both before preparing
+   the write and immediately before commit. The applied memory offset is removed
+   before comparing against the nominal band. Unknown readings refuse the write;
+   an earlier performance capture cannot authorize a later idle-state write.
+   The nearby GP102/TU102 P2/P0 clock pairs are supported from measured register
+   equivalence. Other chips use their highest enumerated clock; the GTX 745's
+   idle 405 MHz state does not qualify against its 900 MHz top band.
 2. **Range and structural refusals before nvtune.**
    Druta does not allow you to write into structural fields (training and phase fragments that have no "looser" or "tigher" direction)
    and fields in a register whose offset is only *inferred* by nvtune. The `new value` column is completely empty for these fields. 

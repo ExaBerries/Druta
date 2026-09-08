@@ -57,13 +57,13 @@ from . import timings
 # ---- outcomes -------------------------------------------------------------- #
 LANDED = "landed"            # written, read back changed
 DROPPED = "dropped"          # reached hardware, read back UNCHANGED
-TOOL_REFUSED = "refused"     # nvtune declined; BAR0 was never touched
+TOOL_REFUSED = "refused"     # Druta/nvtune declined; BAR0 was never touched
 FAILED = "failed"            # nvtune errored, or we could not parse it
 
 OUTCOME_TEXT = {
     LANDED: "written and verified",
     DROPPED: "reached the hardware and was rejected",
-    TOOL_REFUSED: "refused by nvtune before any hardware access",
+    TOOL_REFUSED: "refused before hardware write",
     FAILED: "nvtune failed",
 }
 
@@ -226,7 +226,9 @@ def read_fields(names, slot, override=None):
     card came last."""
     if not names:
         return {}
-    out, _rc = _run(["get"] + list(names), override, slot=slot)
+    out, rc = _run(["get"] + list(names), override, slot=slot)
+    if rc != 0:
+        raise WriteError(out or f"nvtune get exited {rc}")
     vals = {}
     for tok in out.replace(",", " ").split():
         if "=" in tok:
@@ -279,14 +281,18 @@ def check(assignments, field_table, snapshot=None):
     return problems
 
 
-def apply(assignments, slot, force=False, override=None):
+def apply(assignments, slot, force=False, override=None, *, before_commit=None):
     """Commit, then classify each field by what ACTUALLY happened.
 
     The dry run is executed first, always, so that a tool-side refusal is
     OBSERVED rather than inferred from an unchanged read-back. That inference is
     exactly the mistake that put four phantom hardware rejections into our
-    Turing results."""
+    Turing results. An optional before_commit() guard returns (ok, reason) and
+    runs after preparation, immediately before the writing subprocess.
+    """
     names = list(assignments)
+    if not names:
+        return Plan({}, [], [], "", ok=True), []
     # Checked here rather than left to _run's raise: every other exit from this
     # function is a (Plan, [Result]) pair, and tw_apply() unpacks it without a
     # try, so raising would surface as a dead button instead of a refusal.
@@ -297,7 +303,17 @@ def apply(assignments, slot, force=False, override=None):
                           "no PCI slot for the selected card - refusing, "
                           "because an un-targeted nvtune write reaches every "
                           "card in the machine") for n in names]
-    before = read_fields(names, slot, override)
+    try:
+        before = read_fields(names, slot, override)
+    except (OSError, subprocess.SubprocessError, WriteError) as e:
+        error = f"pre-write read failed; nothing committed: {e}"
+        return Plan(assignments, [], [], "", ok=False, error=error), [
+            Result(n, None, assignments[n], None, FAILED, error) for n in names]
+    missing = [n for n in names if n not in before]
+    if missing:
+        error = "pre-write values unavailable; nothing committed: " + ", ".join(missing)
+        return Plan(assignments, [], [], "", ok=False, error=error), [
+            Result(n, before.get(n), assignments[n], None, FAILED, error) for n in names]
 
     pre = plan(assignments, slot, override)
     if not pre.ok:
@@ -312,23 +328,51 @@ def apply(assignments, slot, force=False, override=None):
 
     args = (["set"] + [f"{k}={v}" for k, v in assignments.items()]
             + ["--commit"] + (["--force"] if force else []))
+    if before_commit is not None:
+        try:
+            ok, reason = before_commit()
+        except Exception as e:
+            return pre, [Result(n, before[n], assignments[n], None, FAILED,
+                                f"pre-commit guard failed; nothing committed: {e}")
+                         for n in names]
+        if not ok:
+            return pre, [Result(n, before[n], assignments[n], None, TOOL_REFUSED,
+                                reason or "pre-commit guard refused; nothing committed")
+                         for n in names]
     try:
-        out, _rc = _run(args, override, slot=slot)
+        out, rc = _run(args, override, slot=slot)
     except (OSError, subprocess.SubprocessError, WriteError) as e:
-        return pre, [Result(n, before.get(n), assignments[n], before.get(n),
-                            FAILED, str(e)) for n in names]
+        return pre, [Result(n, before[n], assignments[n], None, FAILED,
+                            f"commit failed; current state is unconfirmed: {e}") for n in names]
 
     if _REFUSE_RE.search(out):
         return pre, [Result(n, before.get(n), assignments[n], before.get(n),
                             TOOL_REFUSED, "nvtune refused the commit")
                      for n in names]
 
-    after = read_fields(names, slot, override)
+    read_error = ""
+    try:
+        after = read_fields(names, slot, override)
+    except (OSError, subprocess.SubprocessError, WriteError) as e:
+        after, read_error = {}, str(e)
+    # A process can fail before touching BAR0, or after only some writes. Keep
+    # any actual read-back, but do not classify either case as hardware refusal
+    # (or a successful write) merely because values happen to match.
+    if rc != 0:
+        detail = f"nvtune commit exited {rc}: {out or 'no error text'}"
+        if read_error:
+            detail += f"; read-back failed: {read_error}"
+        return pre, [Result(n, before[n], assignments[n], after.get(n), FAILED, detail)
+                     for n in names]
     results = []
     for n in names:
         want = int(assignments[n])
         got = after.get(n)
-        if got == want:
+        if got is None:
+            results.append(Result(n, before[n], want, None, FAILED,
+                                  "post-write read-back unavailable"
+                                  + (f": {read_error}" if read_error else "")))
+        elif got == want:
             results.append(Result(n, before.get(n), want, got, LANDED))
         elif got == before.get(n):
             results.append(Result(n, before.get(n), want, got, DROPPED,

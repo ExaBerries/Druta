@@ -278,9 +278,10 @@ class Druta:
         self._once = {}            # log-dedup state, keyed per source
         self._ctl_widgets = []     # write widgets greyed out while locked
         self._slider_ranges = {}   # knob key -> KnobRange, filled by slider_row
-        # knob key -> a hi bound the card is ALREADY carrying, which a
-        # narrowing must not drag it below. See ov_carryover().
+        # Observed requests outside normal bounds must survive narrowing.
+        # Each knob keeps the applicable endpoint; see ov_carryover().
         self._carryover_hi = {}
+        self._carryover_lo = {}
         self._knob_cb = {}         # knob key -> its apply callback, for Stock
         self._xoc_bounds = False   # are the XOC bounds the ones on the knobs?
         # The slider and its text box write each other. DPG does not fire a
@@ -1283,6 +1284,12 @@ class Druta:
         """
         if not self.guard():
             return
+        try:
+            limits = {field: self.knob_input_value("vlim", value)
+                      for field, value in limits.items()}
+        except (TypeError, ValueError, OverflowError) as exc:
+            self.log(f"voltage limit input: {exc}", False)
+            return
         if (dpg.does_item_exist("vlim_link") and dpg.get_value("vlim_link")):
             named = [k for k in self.VLIM_LINKED if k in limits]
             # Only when exactly one of the pair was moved: a call that already
@@ -1452,7 +1459,7 @@ class Druta:
             fields = (raw or {}).get(1 if key.startswith("vlim1") else 0)
             if not (supported and fields):
                 continue
-            val = int(round(GPU.abs_limit_mv(fields, field)))
+            val = GPU.abs_limit_mv(fields, field)
             for pre in ("sl_", "in_"):
                 if dpg.does_item_exist(pre + key):
                     dpg.set_value(pre + key, val)
@@ -1470,7 +1477,7 @@ class Druta:
         if supported and f:
             limits = {key: GPU.abs_limit_mv(f, key)
                       for key in GPU.VOLT_LIMIT_FIELDS}
-            cap = f"cap {GPU.rail_ceiling_mv(f):.0f}"
+            cap = f"cap {GPU.rail_ceiling_mv(f):.9g}"
             suffix = " limits"
         elif s:
             limits = s
@@ -1478,14 +1485,14 @@ class Druta:
             suffix = " (read-only)"
         else:
             return None
-        fields = (f"rel {limits['reliability']:.0f} / "
-                  f"alt {limits['alt_reliability']:.0f}\n"
-                  f"ov {limits['overvoltage']:.0f} / "
-                  f"vmin {limits['vmin']:.0f} mV")
+        fields = (f"rel {limits['reliability']:.9g} / "
+                  f"alt {limits['alt_reliability']:.9g}\n"
+                  f"ov {limits['overvoltage']:.9g} / "
+                  f"vmin {limits['vmin']:.9g} mV")
         # Cap includes the confirmed boost headroom; effective is the card's
         # own limit readback. Keep both quantities separately labelled.
-        live = f"live {s['live']:.0f} mV" if s.get("live") else "live --"
-        eff = f"eff {s['effective']:.0f}" if s.get("effective") else ""
+        live = f"live {s['live']:.9g} mV" if s.get("live") else "live --"
+        eff = f"eff {s['effective']:.9g}" if s.get("effective") else ""
         return (("NVVDD" if rail == 0 else "MSVDD") + suffix,
                 fields, cap, live, eff)
 
@@ -1556,7 +1563,7 @@ class Druta:
                 key = f"{prefix}_{short}"
                 self.slider_row(
                     key, f"{name} {label} (mV)", lo_mv, hi_mv,
-                    int(round(GPU.abs_limit_mv(lim[rail], field))),
+                    GPU.abs_limit_mv(lim[rail], field),
                     lambda v, r=rail, f=field: self.apply_vlim(r, **{f: v}),
                     color=color, extra=("Stock", lambda k=key: self.stock_knob(k)),
                     xoc_lo=lo_mv, xoc_hi=xoc_hi_mv)
@@ -2128,7 +2135,7 @@ class Druta:
                                     self.slider_row(
                                         "rail", "NVVDD offset (mV)", -100,
                                         int(self.gpu.RAIL_OFFSET_MAX_MV),
-                                        int(rv or 0), self.apply_rail,
+                                        rv, self.apply_rail,
                                         # The backend enforces the same positive
                                         # request maxima: +200 normal, +500 XOC.
                                         # These offsets need not translate 1:1
@@ -2208,7 +2215,7 @@ class Druta:
                 # identically, and that neither disturbs the bar itself,
                 # min/max_value, clamped, or set_value/get_value, so " " was
                 # kept as the one that also works on builds where "" does not.
-                slider = dpg.add_slider_float if key == "mem" else dpg.add_slider_int
+                slider = dpg.add_slider_float if self.float_knob(key) else dpg.add_slider_int
                 slider(tag=f"sl_{key}", label="", default_value=init,
                        min_value=lo, max_value=hi, clamped=True,
                        width=-1, format=" ", callback=lambda: self.knob_dragged(key))
@@ -2228,11 +2235,11 @@ class Druta:
             # clamped - a typed 5000 must not survive as a displayed 5000.
             # step=0 drops DPG's +/- buttons, which would eat most of a cell
             # this narrow.
-            input_box = dpg.add_input_float if key == "mem" else dpg.add_input_int
+            input_box = dpg.add_input_float if self.float_knob(key) else dpg.add_input_int
             input_box(tag=f"in_{key}", label="", default_value=init,
                       min_value=lo, max_value=hi, min_clamped=True,
                       max_clamped=True, step=0, width=-1,
-                      **({"format": "%.9g"} if key == "mem" else {}),
+                      **({"format": "%.9g"} if self.float_knob(key) else {}),
                       callback=lambda: self.knob_typed(key))
             # what the card is MEASURED to be doing for this knob, kept beside
             # the value being asked for (refresh_control fills it). Its cell
@@ -2269,6 +2276,35 @@ class Druta:
                         self._ctl_widgets.append(tag)
 
     # ---- slider <-> text box, and what either is allowed to reach ---------- #
+    @staticmethod
+    def float_knob(key):
+        return key in ("mem", "rail", "i2crail") or key.startswith("vlim")
+
+    def knob_input_value(self, key, value):
+        """Encode fractional inputs on the same wire grid as their setter."""
+        if key == "mem":
+            return self.memory_offset_value(value)
+        if not self.float_knob(key):
+            return int(value)
+        if isinstance(value, bool):
+            raise ValueError("voltage must be a number, not a boolean")
+        value = float(value)
+        if not math.isfinite(value):
+            raise ValueError("voltage must be finite")
+        if key == "i2crail":
+            if getattr(self.rail, "absolute_voltage", False):
+                # NCP4206 floors the requested voltage onto its VID grid.
+                from .ncp4206 import decode_vid, encode_vid
+                return decode_vid(encode_vid(value))
+            step = self.rail.p.lsb_mv
+            if (isinstance(step, bool) or not isinstance(step, (int, float))
+                    or not math.isfinite(step) or step <= 0):
+                raise ValueError("controller offset step is unavailable")
+            return round(value / step) * step
+        # Driver NVVDD offsets and absolute rail limits are integer microvolts.
+        # Normalize float-widget roundoff without losing the requested uV.
+        return round(value * 1000) / 1000
+
     def knob_bounds(self, key):
         """The bounds one knob is under RIGHT NOW.
 
@@ -2284,11 +2320,10 @@ class Druta:
         if r.xoc_lo is not None and self._xoc_bounds:
             return min(r.lo, r.xoc_lo), max(r.hi, r.xoc_hi)
         # Without XOC the bound is the normal one, EXCEPT where the card is
-        # already carrying something higher. Narrowing past a live value would
-        # either drag the knob below what the rail actually holds or make the
-        # value unre-appliable, and neither is what "stop it going higher"
-        # means.
-        return r.lo, max(r.hi, self._carryover_hi.get(key, r.hi))
+        # already carrying a value outside it. Preserve that endpoint so the
+        # value can stay or move back toward the normal envelope.
+        return (min(r.lo, getattr(self, "_carryover_lo", {}).get(key, r.lo)),
+                max(r.hi, self._carryover_hi.get(key, r.hi)))
 
     def knob_dragged(self, key):
         if self._knob_sync or not dpg.does_item_exist(f"in_{key}"):
@@ -2296,8 +2331,8 @@ class Druta:
         self._knob_sync = True
         try:
             value = dpg.get_value(f"sl_{key}")
-            value = self.memory_offset_value(value) if key == "mem" else int(value)
-            if key == "mem":
+            value = self.knob_input_value(key, value)
+            if self.float_knob(key):
                 dpg.set_value(f"sl_{key}", value)
             dpg.set_value(f"in_{key}", value)
         except (TypeError, ValueError, OverflowError) as exc:
@@ -2316,7 +2351,7 @@ class Druta:
             return
         value = dpg.get_value(f"in_{key}")
         try:
-            value = self.memory_offset_value(value) if key == "mem" else int(value)
+            value = self.knob_input_value(key, value)
         except (TypeError, ValueError, OverflowError) as exc:
             self.log(f"{key} input: {exc}", False)
             return
@@ -2324,7 +2359,7 @@ class Druta:
         self._knob_sync = True
         try:
             dpg.set_value(f"sl_{key}", v)
-            if key == "mem":
+            if self.float_knob(key):
                 dpg.set_value(f"in_{key}", v)
         finally:
             self._knob_sync = False
@@ -2349,7 +2384,7 @@ class Druta:
                     continue
                 if dpg.is_item_focused(box) or dpg.is_item_active(box):
                     continue
-                number = float if key == "mem" else int
+                number = float if self.float_knob(key) else int
                 v = number(dpg.get_value(sl))
                 if number(dpg.get_value(box)) != v:
                     dpg.set_value(box, v)
@@ -2373,12 +2408,9 @@ class Druta:
         was_xoc = self._xoc_bounds
         self._xoc_bounds = bool(xoc)
         # UNTICKING XOC DOES NOT TOUCH THE CARD, by decision: a value already
-        # set above the non-XOC threshold may STAY, and what XOC-off buys is
-        # that nothing can be set above it from here on. So the widget bound
-        # narrows to the stock ceiling OR to whatever the rail is already
-        # carrying, whichever is higher - see ov_carryover(). Raising is
-        # blocked, lowering is not, and nothing is silently rewritten behind
-        # the user.
+        # outside the normal envelope may STAY. Retain the observed endpoint
+        # while narrowing the other bounds, so subsequent changes can move
+        # back toward normal without silently replacing the live request.
         #
         # The earlier version of this forced the field back to stock on the
         # untick edge. That was safe and it was also not what was asked for.
@@ -2386,7 +2418,8 @@ class Druta:
         for key, r in self._slider_ranges.items():
             if not dpg.does_item_exist(f"sl_{key}"):
                 continue
-            lo, hi = r.lo, max(r.hi, self._carryover_hi.get(key, r.hi))
+            lo = min(r.lo, getattr(self, "_carryover_lo", {}).get(key, r.lo))
+            hi = max(r.hi, self._carryover_hi.get(key, r.hi))
             if xoc and r.xoc_lo is not None:
                 # XOC may only ever WIDEN. Taken as min/max against the normal
                 # pair rather than trusted from the XOC pair alone, because
@@ -2396,7 +2429,7 @@ class Druta:
                 lo, hi = min(lo, r.xoc_lo), max(hi, r.xoc_hi)
             # Value first, bounds second. Narrowing the other way round leaves
             # a frame in which the widget holds a value outside its own range.
-            number = float if key == "mem" else int
+            number = float if self.float_knob(key) else int
             was = number(dpg.get_value(f"sl_{key}"))
             now = max(lo, min(hi, was))
             if now != was:
@@ -2454,19 +2487,25 @@ class Druta:
         # add_slider_int has no resolution, so the value is snapped on Apply and
         # written back to the slider - the number on screen is the number in the
         # card.
-        step = (self.gpu.clkdom_step_mhz()
-                if self.gpu.clkdom_is_blackwell()
-                else self.step_mhz()) or self.step_mhz()
-        mhz = int(math.floor(int(v) / step)) * step
+        blackwell = self.gpu.clkdom_is_blackwell()
+        step_khz = ((self.gpu.clkdom_step_mhz() or self.step_mhz()) * 1000
+                    if blackwell else self.step_khz())
+        bins = int(v) * 1000 // step_khz
         # ...but never past the driver's own floor. That bound is not a multiple
         # of 15 (-200 snaps DOWN to -210), so at the very bottom of the slider
         # the snap would leave the legal range and set_clock_offset would refuse
         # the write - a dead Apply. The lowest legal bin is the only way out.
         rng = self.gpu.static.get("core_off_range")
         lo = rng[0] if rng else -200
-        mhz = max(mhz, int(math.ceil(lo / step)) * step)
+        bins = max(bins, math.ceil(lo * 1000 / step_khz))
+        # Pascal's 12.657 MHz bin is not the rounded 13 MHz UI increment.
+        # Encode the chosen physical bin in whole driver MHz exactly as the
+        # backend does, so a displayed/read-back value is stable on re-Apply.
+        mhz = math.ceil(bins * step_khz / 1000)
         if mhz != int(v):
             dpg.set_value("sl_core", mhz)
+        if dpg.does_item_exist("in_core"):
+            dpg.set_value("in_core", mhz)
         # An undo point, unlike the other sliders: this offset lands in the
         # SAME delta table as the curve (see nvbackend.set_clock_offset),
         # so one drag and one Apply overwrites a hand-tuned curve that is
@@ -2513,8 +2552,8 @@ class Druta:
                 if measured is None:
                     self.invalidate_i2c_verification()
                     return None
-                return (f"Auto {measured:.0f}" if tel.get("target_mv") is None
-                        else f"{measured:.0f} mV")
+                return (f"Auto {measured:.9g}" if tel.get("target_mv") is None
+                        else f"{measured:.9g} mV")
             v = self.rail.read_vout()
         except Exception:                                       # noqa: BLE001
             self.invalidate_i2c_verification()
@@ -2523,8 +2562,8 @@ class Druta:
             self.invalidate_i2c_verification()
             return None
         if not vc:
-            return f"{v:.0f} mV"
-        return f"{v:.0f} mV  ({v - vc:+.0f} vs GPU)"
+            return f"{v:.9g} mV"
+        return f"{v:.9g} mV  ({v - vc:+.9g} vs GPU)"
 
     # ---- the I2C rail: verify before you are allowed to drive it ----------- #
     def invalidate_i2c_verification(self):
@@ -2603,13 +2642,13 @@ class Druta:
             self.slider_row(
                 "i2crail", (f"{rp.rail} voltage target (mV)" if absolute
                             else f"{rp.rail} offset at VRM (mV)"),
-                int(rp.env_min), int(rp.env_max),
-                int((tel.get("target_mv") or tel.get("vout_mv") or rp.env_min)
-                    if absolute else (tel.get("offset_mv") or 0)),
+                rp.env_min, rp.env_max,
+                ((tel.get("target_mv") or tel.get("vout_mv") or rp.env_min)
+                 if absolute else (tel.get("offset_mv") or 0)),
                 self.apply_i2c_rail,
                 extra=[("Verify", self.verify_i2c_rail),
                        ("Auto" if absolute else "Stock", lambda: self.stock_knob("i2crail"))],
-                color=BAD, xoc_lo=int(rp.hw_min_mv), xoc_hi=int(rp.hw_max_mv))
+                color=BAD, xoc_lo=rp.hw_min_mv, xoc_hi=rp.hw_max_mv)
 
     def refresh_i2c_candidates(self):
         if not dpg.does_item_exist("i2c_candidates"):
@@ -2869,14 +2908,19 @@ class Druta:
                      "this is the one knob whose mistakes are not undone by a "
                      "reboot.", False)
             return
-        okp, plan = self.rail.plan(float(v))
+        try:
+            v = self.knob_input_value("i2crail", v)
+        except (TypeError, ValueError, OverflowError) as exc:
+            self.log(f"I2C voltage input: {exc}", False)
+            return
+        okp, plan = self.rail.plan(v)
         self.log("dry run: " + plan, okp)
         if not okp:
             return
         self.autosave_before("i2c-rail-offset")
         setter = (self.rail.set_voltage_mv if getattr(self.rail, "absolute_voltage", False)
                   else self.rail.set_offset_mv)
-        self.report(setter(float(v), acknowledged=True))
+        self.report(setter(v, acknowledged=True))
         self.sync_profile_rail_sliders()
 
     def apply_rail(self, v):
@@ -2885,8 +2929,16 @@ class Druta:
         # directly, and the value it replaces is not recorded anywhere else -
         # the boost % beside it reads a different mechanism entirely.
         if self.guard():
+            try:
+                v = self.knob_input_value("rail", v)
+            except (TypeError, ValueError, OverflowError) as exc:
+                self.log(f"NVVDD offset input: {exc}", False)
+                return
+            for pre in ("sl_", "in_"):
+                if dpg.does_item_exist(pre + "rail"):
+                    dpg.set_value(pre + "rail", v)
             self.autosave_before("core-rail-offset")
-            ok, msg = self.gpu.set_rail_offset_mv(int(v), 0)
+            ok, msg = self.gpu.set_rail_offset_mv(v, 0)
             # A held V/F point PINS the voltage, so the write lands in the
             # control block and the rail does not move at all. Reporting a bare
             # success for that reads as "applied" and is how a working knob got
@@ -3407,38 +3459,21 @@ class Druta:
         # A failed release that still dropped the banner would leave the driver
         # holding a card nothing on screen names, which is the exact
         # disagreement release_lock refuses to create (see its docstring). The
-        # V/F step is only emitted when one was actually held, so a missing
-        # entry for the recorded kind means nothing needed releasing.
+        # missing release verdict is not evidence that a recorded hold ended.
         kind = (self._clk_lock or {}).get("kind")
         if kind == self.LOCK_P0:
             released[self.LOCK_P0] = not self.gpu.legacy_p0_owned()
-        if kind is None or released.get(kind, True):
+        if kind is None or released.get(kind, False):
             self.set_lock_state(None)
         else:
-            self.log(f"the {self.LOCK_NAME[kind]} was NOT released - the "
-                     f"indicator stays up because the driver is still "
-                     f"holding the card", False)
-        st = self.gpu.static
-        dpg.set_value("sl_core", 0)
-        dpg.set_value("sl_mem", 0)
-        if dpg.does_item_exist("sl_pl"):
-            dpg.set_value("sl_pl", st.get("pl_def_mw", 260000) // 1000)
-        vb = self.gpu.read_voltage_boost()
-        if dpg.does_item_exist("sl_volt"):
-            dpg.set_value("sl_volt", 0 if vb is None else max(0, min(100, vb)))
-        dpg.set_value("sl_fan", st.get("fan_min", 30))
-        # The per-domain offsets and the core rail ARE cleared on the card by
-        # GPU.reset_all() above - but their sliders were never zeroed here, so
-        # the hardware went to stock while the UI kept showing the old numbers.
-        # That is worse than cosmetic: the next Apply on a stale slider silently
-        # re-applies an offset the user believes they just cleared. Guarded on
-        # existence because these rows are built only where the control block
-        # answers AND a pairing was measured, so most cards have neither.
-        for kn in self.DOMAIN_KNOBS:
-            if dpg.does_item_exist(f"sl_{kn.key}"):
-                dpg.set_value(f"sl_{kn.key}", 0)
-        if dpg.does_item_exist("sl_rail"):
-            dpg.set_value("sl_rail", 0)
+            if kind not in released:
+                failed += 1
+            self.log(f"the {self.LOCK_NAME[kind]} release was NOT confirmed - "
+                     "the indicator stays up until release is confirmed", False)
+        # A refused reset or missing getter must not turn a live offset into a
+        # displayed zero. Re-read each available request; preserve the last
+        # displayed value wherever readback is unavailable.
+        self.sync_sliders_from_gpu(state={"reset": True})
         # The regulator offset is NOT in gpu.reset_all(): that walks the
         # driver, and this one does not live in the driver. It is also the only
         # thing on this tab a reboot will not undo, so it gets its own line
@@ -3453,6 +3488,7 @@ class Druta:
                     self.sync_profile_rail_sliders()
                 else:
                     dpg.set_value("sl_i2crail", 0)
+        self.sync_profile_rail_sliders()
         # None of the set_value calls above fires a slider callback, so the
         # typed-value boxes would keep showing the pre-reset numbers until the
         # next panel tick - on the one button whose whole point is that the
@@ -3469,17 +3505,15 @@ class Druta:
         self.vf_read(force=True)
 
     def ov_carryover(self, raw):
-        """Record rail settings already above the normal request bounds.
+        """Record rail settings already outside the normal request bounds.
 
-        Unticking XOC does not rewrite the card - a value set above the
-        non-XOC ceiling is allowed to stay - so the knob's bound has to make
-        room for it, or the very next narrowing would drag the slider below
-        what the rail actually holds and the number on screen would stop being
-        the number on the card.
+        Unticking XOC does not rewrite the card. A value outside the normal
+        envelope is allowed to stay, so the widget's bounds must leave room
+        for that exact request when the gate narrows.
 
-        Recorded rather than enforced: this only ever RAISES a bound to meet a
-        value that is already live. Lowering stays available all the way down,
-        and nothing here permits raising an existing above-normal value.
+        Extend only as far as the observed value. The backend allows keeping
+        that request or moving back toward its normal envelope; it refuses
+        movement farther outside, including a more negative NVVDD offset.
         """
         for rail in (0, 1):
             fields = (raw or {}).get(rail)
@@ -3491,15 +3525,23 @@ class Druta:
                                  ("ov", "overvoltage"), ("lo", "vmin")):
                 key = f"{prefix}_{short}"
                 cur = GPU.abs_limit_mv(fields, field)
-                if cur > self.gpu.VOLT_LIMIT_MAX_MV + 0.5:
-                    self._carryover_hi[key] = int(round(cur))
+                if cur > self.gpu.VOLT_LIMIT_MAX_MV:
+                    self._carryover_hi[key] = cur
                 else:
                     self._carryover_hi.pop(key, None)
         offset = self.gpu.read_rail_offset_mv(0)
-        if offset is not None and offset > self.gpu.RAIL_OFFSET_MAX_MV:
-            self._carryover_hi["rail"] = int(round(offset))
+        if offset is None:
+            return  # A missing read does not erase the last observed endpoint.
+        if offset > self.gpu.RAIL_OFFSET_MAX_MV:
+            self._carryover_hi["rail"] = offset
         else:
             self._carryover_hi.pop("rail", None)
+        lower = getattr(self, "_carryover_lo", {})
+        if offset < -100.0:  # The normal NVVDD floor in set_rail_offset_mv.
+            lower["rail"] = offset
+        else:
+            lower.pop("rail", None)
+        self._carryover_lo = lower
 
     def refresh_rail_live(self):
         """Put the live rail voltages back on the panel, every tick.
@@ -3521,10 +3563,10 @@ class Druta:
                 continue
             row = (state or {}).get(r, {})
             mv = row.get("live")
-            dpg.set_value(tag, f"live {mv:.0f} mV" if mv else "live --")
+            dpg.set_value(tag, f"live {mv:.9g} mV" if mv else "live --")
             eff = row.get("effective")
             if dpg.does_item_exist(f"vlim_eff{r}"):
-                dpg.set_value(f"vlim_eff{r}", f"eff {eff:.0f}" if eff else "")
+                dpg.set_value(f"vlim_eff{r}", f"eff {eff:.9g}" if eff else "")
             if r in getattr(self, "_rail_readonly", ()):
                 cells = self.volt_limits_cells(None, r, state, False)
                 if cells and dpg.does_item_exist(f"vlim_txt{r}"):
@@ -5981,7 +6023,8 @@ deliberately does not put behind a button."""
                 if value is not None:
                     for prefix in ("sl_", "in_"):
                         if dpg.does_item_exist(prefix + key):
-                            dpg.set_value(prefix + key, int(round(value)))
+                            dpg.set_value(prefix + key, float(value) if self.float_knob(key)
+                                          else int(round(value)))
         except Exception as e:
             self.log(f"rail/clock sliders could not be refreshed: {e}", False)
 
@@ -7131,12 +7174,17 @@ deliberately does not put behind a button."""
 
     def tw_apply(self, sender=None, app_data=None, user_data=None):
         if getattr(self, "_i2c_busy", False) or getattr(self, "_profile_pending", None):
-            self.log("wait for I2C verification and restoration before changing timings", False)
+            self.log("wait for I2C verification and restoration before writing timings", False)
+            return
+        if not self.guard():
             return
         if not self._tw_pending:
             return
         ft = getattr(self, "_tim_ft", None)
         problems = timingwrite.check(self._tw_pending, ft, self._tim)
+        ready, reason = self.timing_write_ready()
+        if not ready:
+            problems.append(reason)
         if problems:
             dpg.set_value("tw_result", "not applied - " + "; ".join(problems))
             dpg.configure_item("tw_result", color=BAD)
@@ -7154,7 +7202,8 @@ deliberately does not put behind a button."""
         self.autosave_before("timing-write")
         force = bool(dpg.get_value("tw_force"))
         _plan, results = timingwrite.apply(dict(self._tw_pending),
-                                           self.gpu.slot(), force=force)
+                                           self.gpu.slot(), force=force,
+                                           before_commit=self.timing_write_ready)
         lines, worst = [], GOOD
         for r in results:
             lines.append(f"{r.name}: {r.before} → asked {r.requested}, "
@@ -7173,6 +7222,34 @@ deliberately does not put behind a button."""
         for ln in lines:
             self.log("timing: " + ln, None)
         self.timings_capture()
+
+    def timing_write_ready(self):
+        """Recheck write permission and the live clock band at the commit boundary."""
+        if not self.guard():
+            return False, "controls are locked or another operation owns the card"
+        floor = getattr(getattr(self, "_tim", None), "band_floor", None)
+        if (isinstance(floor, bool) or not isinstance(floor, (int, float))
+                or not math.isfinite(floor) or floor <= 0):
+            return False, "top memory band is unknown; capture timings again before writing"
+        try:
+            live = self.gpu.read()
+            memory, pstate, offset = live.get("mem"), live.get("pstate"), live.get("mem_off")
+        except Exception as exc:
+            return False, f"live memory clock could not be checked: {exc}"
+        if (isinstance(offset, bool) or not isinstance(offset, (int, float))
+                or not math.isfinite(offset)):
+            return False, "live memory offset is unknown; no timing write"
+        # NVML's offset wire unit is half one reported-clock MHz. Compare the
+        # underlying enumerated band, so a deliberate negative memory offset
+        # does not turn a real P0 reading into a false idle classification.
+        ready = timings.in_performance_band(
+            memory, pstate, self._tim.mem_states, self._tim.codename,
+            mem_offset=offset / 2.0)
+        if ready is not True:
+            return False, (f"live memory clock {memory!r}, state {pstate!r}, offset "
+                           f"{offset / 2:g} MHz do not confirm the captured top band "
+                           f"(nominal floor {floor:g} MHz); no timing write")
+        return True, "live memory clock is in the captured top band"
 
     def tw_restore(self, sender=None, app_data=None, user_data=None):
         if getattr(self, "_i2c_busy", False) or getattr(self, "_profile_pending", None):
@@ -7344,6 +7421,7 @@ deliberately does not put behind a button."""
         self.gpu.volt_limits_write_enabled = False
         self.gpu.voltage_xoc_enabled = False
         self._carryover_hi = {}
+        self._carryover_lo = {}
         self._discard_armed = False
         self._reset_armed = False
         self._pending_load = None
@@ -8633,6 +8711,15 @@ deliberately does not put behind a button."""
             self.build_monitor()
             self.build_timings()
 
+    def dispatch_callbacks(self):
+        """Discard outgoing-card jobs when a callback rebuilds the widget tree."""
+        generation = getattr(self, "_gpu_gen", None)
+        for job in dpg.get_callback_queue() or ():
+            dpg.run_callbacks([job])
+            if (getattr(self, "_gpu_gen", None) != generation
+                    or not dpg.is_dearpygui_running()):
+                break
+
     def run(self):
         # main() reports this properly (and visibly, on a console-less build)
         # before calling run(); this is the guard for any other caller.
@@ -8730,7 +8817,7 @@ deliberately does not put behind a button."""
             while dpg.is_dearpygui_running():
                 if self._startup_manager and self._startup_manager.ending:
                     break
-                dpg.run_callbacks(dpg.get_callback_queue())
+                self.dispatch_callbacks()
                 if not dpg.is_dearpygui_running():
                     break
                 self.poll_profile_load()
