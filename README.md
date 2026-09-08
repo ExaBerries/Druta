@@ -94,24 +94,42 @@ commands inside `source`.
 
 # Development
 
-```bash
+Use Python 3.11 or newer. Release builds use the interpreter and dependency
+versions recorded in `requirements.txt`.
+
+```powershell
 python -m venv .venv
-.venv\Scripts\activate
-pip install -e .
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev]"
+python -m druta
 ```
 
-Run the tests:
+Run the hardware-free regression suite:
 
-```bash
-pytest
+```powershell
+python -m pytest
 ```
 
 Lint and type-check:
 
-```bash
+```powershell
 ruff check src/ tests/
 pyright
 ```
+
+Application modules live in `src/druta/`; regression tests live in `tests/`.
+The root `druta.py` remains a small compatibility launcher so existing source
+commands and registered sign-in tasks keep working after the move.
+The diagnostic commands below use package modules and require the editable
+installation above. For example, `python -m druta.tools.i2c_discover --help`
+shows the survey options without accessing a GPU.
+
+Existing source profiles and undo snapshots remain in the checkout's
+`profiles/` directory, and editable regulator recipes remain in `i2c/`.
+Bundled applications retain their existing `_internal/profiles/` storage and
+beside-executable `i2c/` overrides. A regular wheel installation stores tuning
+profiles under `%LOCALAPPDATA%\Thermetery\Druta\profiles` and includes its
+regulator recipes and license documents as package data.
 
 ---
 
@@ -119,7 +137,9 @@ pyright
 # Run
 
 - `dist\Druta\Druta.exe` — bundled application, no Python needed.
-- or `python druta.py` from source.
+- `python druta.py` — launch a source checkout after installing
+  `requirements.txt`; no editable installation is required.
+- `python -m druta` — launch an editable or regular installed package.
 - **Run as administrator** for every write path: clock lock, fan, power limit,
   V/F curve, memory timings.
 ---
@@ -320,20 +340,20 @@ by an end-to-end test after the first build exposed a reversed XBAR slider.
 Before testing a new RTX 50-series card or driver, collect a read-only report:
 
 ```powershell
-python nvbackend.py --clkdom-debug --json > clkdom-debug.json
+python -m druta.nvbackend --clkdom-debug --json > clkdom-debug.json
 ```
 
 For an administrator-only, temporary mapping check, use the explicit probe:
 
 ```powershell
-python nvbackend.py --clkdom-map-probe --confirm > clkdom-map.json
+python -m druta.nvbackend --clkdom-map-probe --confirm > clkdom-map.json
 ```
 
 If the mapping probe reports accepted writes but no settled clock movement,
 compare the two frequency-field candidates with the field-only probe:
 
 ```powershell
-python nvbackend.py --clkdom-field-probe --confirm > clkdom-fields.json
+python -m druta.nvbackend --clkdom-field-probe --confirm > clkdom-fields.json
 ```
 
 This tests only `+0x10C` and `+0x114`; it never writes the neighbouring NVVDD
@@ -347,7 +367,7 @@ If the field probe accepts the writes but controls 1/3/4 all remain inert,
 scan the other non-core/non-memory control indices:
 
 ```powershell
-python nvbackend.py --clkdom-control-probe --delta 25 --confirm > clkdom-controls.json
+python -m druta.nvbackend --clkdom-control-probe --delta 25 --confirm > clkdom-controls.json
 ```
 
 The scan deliberately excludes controls 0 and 2 because another driver branch
@@ -356,15 +376,15 @@ repeat with `--include-core-memory`; the probe still restores the complete GET
 buffer after every individual write:
 
 ```powershell
-python nvbackend.py --clkdom-control-probe --include-core-memory --delta 25 --confirm > clkdom-controls-all.json
+python -m druta.nvbackend --clkdom-control-probe --include-core-memory --delta 25 --confirm > clkdom-controls-all.json
 ```
 
 For a driver that stores a small request but shows no physical response, the
 explicit diagnostic also accepts a larger temporary delta up to `±200 MHz`:
 
 ```powershell
-python nvbackend.py --clkdom-field-probe --delta 200 --confirm > clkdom-fields-plus200.json
-python nvbackend.py --clkdom-field-probe --delta -200 --confirm > clkdom-fields-minus200.json
+python -m druta.nvbackend --clkdom-field-probe --delta 200 --confirm > clkdom-fields-plus200.json
+python -m druta.nvbackend --clkdom-field-probe --delta -200 --confirm > clkdom-fields-minus200.json
 ```
 
 Use this only with a stable test point and workload. The larger limit applies
@@ -594,6 +614,17 @@ live voltage in two repeated cycles on each card. The former claim here that
 this cap could not be raised was disproved by that measurement. See
 [the per-rail findings](VOLTAGE-RAILS-TITAN.md) for exact conditions and scope.
 
+## Contributing I2C controller support
+
+Start with the [I2C contribution workflow](i2c/CONTRIBUTING.md),
+[recipe and adapter reference](i2c/PROFILES.md), and
+[I2C PR template](.github/PULL_REQUEST_TEMPLATE/i2c_profile.md).
+Kepler NCP4206 and MP2888A discovery scan actual buses without board-ID filters.
+Another board with one of these controllers usually needs discovery and
+Verify/restore evidence, rather than a duplicate TOML profile. Druta lists
+matching candidates by port/address; an ambiguous scan requires selection.
+Verify performs bounded writes and must confirm restoration before Apply.
+
 ## Profiles and undo points
 
 Named profiles snapshot both offsets, the power limit, the voltage boost, the
@@ -607,8 +638,9 @@ list names these values, and loading reports each control's result. Rails
 that Druta has not confirmed writable remain unavailable; MSVDD's unconfirmed
 voltage-offset field is not replayed.
 
-I2C profiles save the offset plus the regulator identity and a fingerprint of
-its complete local TOML recipe, including its limits. They do not save or replay
+I2C tuning profiles save the controller state (MP2888A offset or NCP4206
+absolute target/Auto), its port/address, and a fingerprint of the bound register
+recipe, including its limits. They do not save or replay
 arbitrary VRM registers or replace that recipe's whitelist/envelope. Loading
 restores the saved XOC mode and enables the required rail controls. Values that
 need XOC (including above-normal carryover left after unticking XOC and a nonzero

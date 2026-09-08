@@ -18,6 +18,8 @@ import threading
 from datetime import datetime
 import xml.etree.ElementTree as ET
 
+from .paths import source_root
+
 NS = "{http://schemas.microsoft.com/win/2004/08/events/event}"
 
 
@@ -112,13 +114,26 @@ def current_sid():
     return sid
 
 
-def launch_command():
+def application_command(*arguments, windowed=False):
+    """Relaunch this installation without depending on the working directory."""
     if getattr(sys, "frozen", False):
-        return [str(Path(sys.executable).resolve()), "--startup-profile"]
+        return [str(Path(sys.executable).resolve()), *arguments]
     executable = Path(sys.executable)
-    windowed = executable.with_name("pythonw.exe")
-    return [str(windowed if windowed.exists() else executable),
-            str(Path(__file__).with_name("druta.py").resolve()), "--startup-profile"]
+    if windowed:
+        candidate = executable.with_name("pythonw.exe")
+        if candidate.is_file():
+            executable = candidate
+    root = source_root()
+    if root is not None:
+        bootstrap = (root / "druta.py").resolve()
+        if not bootstrap.is_file():
+            raise RuntimeError(f"cannot find the source launcher ({bootstrap})")
+        return [str(executable), str(bootstrap), *arguments]
+    return [str(executable), "-m", "druta", *arguments]
+
+
+def launch_command():
+    return application_command("--startup-profile", windowed=True)
 
 
 def task_xml(command, sid):

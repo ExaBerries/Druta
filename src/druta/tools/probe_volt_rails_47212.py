@@ -13,7 +13,7 @@ import time
 
 # When run as module, parent package is accessible
 from .. import nvbackend as n
-from ..tools.probe_volt_rails import rm_call, snapshot, stable_fields, transport_ok
+from .probe_volt_rails import rm_call, snapshot, stable_fields, transport_ok
 
 CONTROL_VERSION = 0x10AC8
 
@@ -30,7 +30,7 @@ def write(gpu, params):
 
 
 def load_tests(gpu, report, save, params):
-    from gpuload import BandwidthLoad
+    from ..gpuload import BandwidthLoad
 
     load = BandwidthLoad(max_seconds=60, slot=gpu.slot())
     report["load_tests"] = run = {"offset_trials": [], "ceiling_trials": []}
@@ -109,7 +109,7 @@ def load_tests(gpu, report, save, params):
 
 def live_field_tests(gpu, report, save, params, include_idle=True):
     """Separate each ceiling's live effect, then verify the idle floor."""
-    from gpuload import BandwidthLoad
+    from ..gpuload import BandwidthLoad
     load = BandwidthLoad(max_seconds=45, slot=gpu.slot())
     report["live_fields"] = trials = []
 

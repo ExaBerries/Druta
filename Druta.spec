@@ -59,7 +59,7 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 # does become implicated, the evidence to gather first is whether the fault
 # reproduces OUTSIDE the bundle - if it does, this is not the cause.
 a = Analysis(
-    ['src/druta/druta.py'],
+    ['src/run_druta.py'],
     pathex=['src'],
     binaries=binaries,
     datas=datas,

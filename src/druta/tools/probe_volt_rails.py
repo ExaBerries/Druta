@@ -155,8 +155,8 @@ def test_raised_ceiling(gpu, report, save, baseline):
     Preserve the exact caller's curve, point/frequency locks, and rail values.
     The highest permission requested is 1125 mV; overvoltage is untouched.
     """
-    from gpuload import BandwidthLoad
-    from nvbackend import _BoostTable, _set_point_masks
+    from ..gpuload import BandwidthLoad
+    from ..nvbackend import _BoostTable, _set_point_masks
 
     def read_table():
         table = _BoostTable(version=gpu.nvapi.ver(_BoostTable, 1))

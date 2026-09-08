@@ -11,7 +11,10 @@ build2_log.txt
 # Python
 __pycache__/
 *.py[cod]
-src/druta.egg-info
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
 
 # Probe scratch output
 ping_ui_result.txt

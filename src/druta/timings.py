@@ -84,6 +84,7 @@ from dataclasses import dataclass, field as _dc_field
 # DLLs open in NvAPI/Nvml constructors - so this stays a pure-Python import and
 # does not make merely importing timings.py touch the hardware.
 from . import nvbackend
+from .paths import app_dir
 
 # ---- where the tool lives -------------------------------------------------- #
 NVTUNE_EXE = "nvtune.exe"
@@ -326,11 +327,8 @@ class TimingsError(RuntimeError):
 #  discovery                                                                   #
 # ============================================================================ #
 def _app_dir():
-    """Where 'next to Druta' means. Under PyInstaller the module lives in
-    a temp extraction dir, so the frozen build has to look beside the EXE."""
-    if getattr(sys, "frozen", False):
-        return os.path.dirname(os.path.abspath(sys.executable))
-    return os.path.dirname(os.path.abspath(__file__))
+    """Preserve source-root and beside-executable portable nvtune discovery."""
+    return str(app_dir())
 
 
 def pinned_exe(override=None):
@@ -1396,7 +1394,7 @@ if __name__ == "__main__":
           f"   inferred: {ft.inferred_registers() or 'none'}"
           f"   aliases: {ft.aliases}")
     try:
-        from nvbackend import GPU, slot_from_argv
+        from .nvbackend import GPU, slot_from_argv
         g = GPU(slot_from_argv())
     except Exception as e:
         print(f"(no GPU backend: {e})")

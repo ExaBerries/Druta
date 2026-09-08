@@ -26,8 +26,8 @@ written when someone asks for it, and it says on its face what it is and when it
 was taken. It never claims to be factory state; "Reset all to stock" remains the
 only thing that does.
 
-Files are plain JSON in profiles/ next to the script, so they can be diffed,
-kept in git, and hand-edited.
+Files are plain JSON in the existing source/bundle profiles/ directory, or in
+per-user storage for an installed package, so they can be hand-edited.
 
 ORDERING NOTE, and it matters: the core clock offset and the V/F delta table are
 the SAME table in the driver. Whichever is written last wins, so restore
@@ -42,9 +42,10 @@ import os
 import re
 import time
 from .startup import atomic_json
+from .paths import profile_dir
 
 SCHEMA = 2
-DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "profiles")
+DIR = str(profile_dir())
 AUTOSAVE_PREFIX = "autosave-"
 KEEP_AUTOSAVES = 20
 # what capture() could not read. A list, not a flag, so the reason travels with
@@ -52,12 +53,16 @@ KEEP_AUTOSAVES = 20
 INCOMPLETE_KEY = "incomplete"
 
 
+def vf_applicable(gpu):
+    return getattr(gpu, "vf_curve_applicable", lambda: True)()
+
+
 def incomplete(state):
     """What this snapshot is MISSING, as human-readable strings (empty = it is
     whole). A profile written before this field existed reports nothing missing
     unless its V/F table is absent, which is the case that matters."""
     miss = list(state.get(INCOMPLETE_KEY) or [])
-    if not miss and not state.get("vf_deltas"):
+    if not miss and not state.get("vf_deltas") and state.get("vf_applicable") is not False:
         miss.append("V/F delta table NOT captured")
     return miss
 
@@ -145,6 +150,7 @@ def capture(gpu, rail=None):
         "fan_manual": None,
         "fan_control_state": None,
         "vf_deltas": None,
+        "vf_applicable": vf_applicable(gpu),
         INCOMPLETE_KEY: [],
     }
     # Modern NVML and the legacy NVAPI fallbacks expose requested per-fan
@@ -166,11 +172,11 @@ def capture(gpu, rail=None):
     except Exception:
         pass
     try:
-        pts, err = gpu.read_vf_curve()
+        pts, err = gpu.read_vf_curve() if state["vf_applicable"] else (None, None)
         if pts:
             state["vf_deltas"] = {str(p["idx"]): int(p["delta_khz"])
                                   for p in pts}
-        else:
+        elif state["vf_applicable"]:
             state[INCOMPLETE_KEY].append(
                 f"V/F delta table NOT captured ({err or 'no points returned'})")
     except Exception as e:
@@ -182,7 +188,8 @@ def capture(gpu, rail=None):
 def rail_identity(rail):
     """Pin bus addressing AND the complete, locally validated regulator recipe."""
     encoded = json.dumps(rail.p.src, sort_keys=True, default=str).encode("utf-8")
-    return {"profile": rail.p.name, "sha256": hashlib.sha256(encoded).hexdigest(),
+    return {"profile": getattr(rail.p, "profile_name", rail.p.name),
+            "sha256": hashlib.sha256(encoded).hexdigest(),
             "port": rail.p.port, "addr7": rail.addr7, "rail": rail.p.rail}
 
 
@@ -234,10 +241,16 @@ def capture_rails(gpu, state, rail):
         missing.append(f"voltage/clock offsets NOT captured ({e})")
     if rail is not None and not rail.p.read_only:
         try:
-            offset = rail.telemetry().get("offset_mv")
-            if offset is None:
-                raise ValueError("offset read failed")
-            state["i2c"] = dict(rail_identity(rail), offset_mv=offset)
+            if getattr(rail, "absolute_voltage", False):
+                control = rail.capture_control()
+                state["i2c"] = dict(rail_identity(rail), control=control,
+                                    display_name=rail.p.name)
+            else:
+                offset = rail.telemetry().get("offset_mv")
+                if offset is None:
+                    raise ValueError("offset read failed")
+                state["i2c"] = dict(rail_identity(rail), offset_mv=offset,
+                                    display_name=rail.p.name)
         except Exception as e:
             missing.append(f"I2C offset NOT captured ({e})")
     # Unticking XOC does not undo above-normal values already in the card.
@@ -248,9 +261,15 @@ def capture_rails(gpu, state, rail):
     required = required or (offset is not None and not -100 <= offset <= 200)
     required = required or bool(state["clock_domain_offsets_mhz"].get("2"))
     if state["i2c"]:
-        offset = state["i2c"]["offset_mv"]
-        required = required or not (getattr(rail.p, "env_min", -200) <= offset
-                                   <= getattr(rail.p, "env_max", 100))
+        if "control" in state["i2c"]:
+            try:
+                rail.validate_control(state["i2c"]["control"], xoc=False)
+            except ValueError:
+                required = True
+        else:
+            offset = state["i2c"]["offset_mv"]
+            required = required or not (getattr(rail.p, "env_min", -200) <= offset
+                                       <= getattr(rail.p, "env_max", 100))
     state["xoc"] = state["xoc"] or required
 
 
@@ -272,6 +291,10 @@ def preflight(gpu, state, rail=None):
     """
     if not isinstance(state, dict) or state.get("schema", 1) not in (1, SCHEMA):
         return "unsupported profile format"
+    if state.get("vf_applicable") is False and vf_applicable(gpu):
+        return "this GPU requires a V/F snapshot; save a fresh profile on this card"
+    if state.get("vf_deltas") and not vf_applicable(gpu):
+        return "V/F curve profiles cannot be applied to this GPU"
     limits = state.get("rail_limits_mv") or {}
     offsets = state.get("clock_domain_offsets_mhz") or {}
     i2c = state.get("i2c")
@@ -318,11 +341,18 @@ def preflight(gpu, state, rail=None):
                     raise ValueError(f"unconfirmed clock control {key}")
                 number(value)
         if i2c:
-            number(i2c["offset_mv"])
             if rail is None or rail.p.read_only or not rail.present():
                 raise ValueError("saved I2C regulator is not available")
             if any(i2c.get(k) != v for k, v in rail_identity(rail).items()):
                 raise ValueError("I2C regulator/profile/limits changed; save a fresh profile")
+            if getattr(rail, "absolute_voltage", False):
+                if "offset_mv" in i2c:
+                    raise ValueError("absolute I2C voltage cannot load an offset")
+                rail.validate_control(i2c.get("control"), xoc=bool(state.get("xoc")))
+            else:
+                if "control" in i2c:
+                    raise ValueError("offset I2C regulator cannot load absolute voltage")
+                number(i2c["offset_mv"])
     except Exception as e:
         return str(e)
     return None
@@ -465,11 +495,15 @@ def restore(gpu, state, apply_curve=True, *, rail=None, i2c_verified=False):
         if not step("NVVDD offset", restore_offset):
             return results + [(False, "profile stopped after NVVDD offset failure")]
     if state.get("i2c"):
-        offset = state["i2c"]["offset_mv"]
-        if not step("I2C dry run", lambda: rail.plan(offset)):
-            return results
-        if not step("I2C offset", lambda: rail.set_offset_mv(offset, acknowledged=True)):
-            return results
+        if "control" in state["i2c"]:
+            if not step("I2C voltage/mode", lambda: rail.restore_control(state["i2c"]["control"])):
+                return results
+        else:
+            offset = state["i2c"]["offset_mv"]
+            if not step("I2C dry run", lambda: rail.plan(offset)):
+                return results
+            if not step("I2C offset", lambda: rail.set_offset_mv(offset, acknowledged=True)):
+                return results
 
     mw = state.get("power_limit_mw")
     if mw:
@@ -524,7 +558,7 @@ def restore(gpu, state, apply_curve=True, *, rail=None, i2c_verified=False):
                                "restored - use Auto or Reset all to stock"))
 
     # LAST, and authoritative: the delta table subsumes the core offset above.
-    if apply_curve:
+    if apply_curve and vf_applicable(gpu):
         if state.get("vf_deltas"):
             deltas = {int(k): int(v) for k, v in state["vf_deltas"].items()}
             step("v/f curve", lambda: gpu.apply_vf_deltas(deltas))
@@ -562,7 +596,14 @@ def summarize(state):
         bits.append(f"NVVDD offset {offset:+g} mV")
     i2c = state.get("i2c")
     if i2c:
-        bits.append(f"I2C {i2c['rail']} {i2c['offset_mv']:+g} mV ({i2c['profile']})")
+        if "control" in i2c:
+            from .ncp4206 import decode_vid
+            control = i2c["control"]
+            target = (f"{decode_vid(control['command']):g} mV" if control['enabled'] else 'Auto (GPU VID)')
+            label = i2c.get("display_name") or i2c['profile']
+            bits.append(f"I2C {i2c['rail']} {target} ({label})")
+        else:
+            bits.append(f"I2C {i2c['rail']} {i2c['offset_mv']:+g} mV ({i2c['profile']})")
     for key, value in (state.get("clock_domain_offsets_mhz") or {}).items():
         label = "Additional Memory Clock Offset" if key == "2" else f"clock control {key}"
         bits.append(f"{label} {value:+g} MHz")

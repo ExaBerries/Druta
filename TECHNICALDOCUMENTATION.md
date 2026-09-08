@@ -33,7 +33,7 @@ Developed against two cards:
 
 ## Run
 
-- `dist\Druta.exe` — standalone, no Python needed.
+- `dist\Druta\Druta.exe` — bundled application, no Python needed.
 - or `python druta.py` from source.
 - **Run as administrator** for every write path: clock lock, fan, power limit,
   V/F curve, memory timings.
@@ -73,7 +73,7 @@ it was placed on, while the Release button in front of you would now be aimed at
 a different GPU. Staged-but-unwritten V/F or timing edits only ask for a
 confirming second click, since losing those costs nothing but the typing.
 
-Two things that are not obvious and are both tested in `test_swap.py`:
+Two things that are not obvious and are both tested in `tests/test_swap.py`:
 
 - A capture or an induced load can be several seconds — up to 25 — inside a call
   that started on the *previous* card. Each worker stamps a generation counter on
@@ -85,18 +85,18 @@ Two things that are not obvious and are both tested in `test_swap.py`:
   and, worse than the memory, a second live handler registry, which made one
   press of `W` nudge the point twice and one `Ctrl+Z` walk back two edits.
 
-`app.py` (the old Tk UI) is kept only as a parity reference for the Dear PyGui
+`src/druta/app.py` (the old Tk UI) is kept only as a parity reference for the Dear PyGui
 port. It has no build target and should not be edited. See
 [Why Dear PyGui](#why-dear-pygui).
 
 ## Build
 
 ```
-pip install dearpygui
-python -m PyInstaller --onefile --noconsole --name Druta --collect-all dearpygui druta.py
+python -m pip install -r requirements.txt
+.\build.ps1
 ```
 
-Output lands in `dist\Druta.exe`.
+Output lands in `dist\Druta\Druta.exe` and the matching ZIP. Distribute the whole bundle, including `_internal` and `source`.
 
 ---
 
@@ -536,15 +536,15 @@ be reused as the UI sign without repeating that test.
 For hardware validation, run:
 
 ```powershell
-python nvbackend.py --clkdom-debug --json > clkdom-debug.json
-python nvbackend.py --clkdom-map-probe --confirm > clkdom-map.json
+python -m druta.nvbackend --clkdom-debug --json > clkdom-debug.json
+python -m druta.nvbackend --clkdom-map-probe --confirm > clkdom-map.json
 ```
 
 When the candidate `+0x114` is accepted but produces no settled movement, use
 the frequency-only comparison probe:
 
 ```powershell
-python nvbackend.py --clkdom-field-probe --confirm > clkdom-fields.json
+python -m druta.nvbackend --clkdom-field-probe --confirm > clkdom-fields.json
 ```
 
 It compares `+0x10C` with `+0x114` for controls 1, 3 and 4. It deliberately
@@ -559,7 +559,7 @@ settled physical effect, scan the remaining non-core/non-memory control
 indices:
 
 ```powershell
-python nvbackend.py --clkdom-control-probe --delta 25 --confirm > clkdom-controls.json
+python -m druta.nvbackend --clkdom-control-probe --delta 25 --confirm > clkdom-controls.json
 ```
 
 This intentionally omits control indices 0 and 2 because they may be GPC and
@@ -567,7 +567,7 @@ memory on a different driver branch.  To include those two potentially
 high-impact paths on a test-only machine, pass the explicit opt-in:
 
 ```powershell
-python nvbackend.py --clkdom-control-probe --include-core-memory --delta 25 --confirm > clkdom-controls-all.json
+python -m druta.nvbackend --clkdom-control-probe --include-core-memory --delta 25 --confirm > clkdom-controls-all.json
 ```
 
 The scan is still one-field-at-a-time, checks the complete returned block
@@ -1091,6 +1091,27 @@ Apply is **one click**, not two. The press-again arm it replaced only described
 the plan once the user had already committed to pressing; the banner describes
 it continuously, and `autosave_before` makes the write recoverable. `Reset all
 to stock` still takes two, because it drops every knob at once.
+
+## I2C discovery and contribution interfaces
+
+`railctl.discover()` returns all controller candidates on the selected GPU.
+NCP4206 uses a Kepler port scan and an absolute-VID adapter; MP2888A scans
+ports/addresses, checks a repeated register fingerprint and binds an offset
+recipe to the discovered connection. These scanners do not use board-ID gates;
+other generic TOML recipes retain optional PCI matching and fixed bus settings.
+
+Candidate selection and Verify are separate steps. Verify makes bounded writes
+under load, measures response and checks restoration. Failed restoration cannot
+authorize Apply. Verification is bound to the current GPU/controller/recipe;
+rescans and selection changes invalidate it. Tuning profiles also capture
+per-rail limits and controller state, including NCP target/Auto or MP offset,
+with the exact connection and recipe fingerprint. An exact unique saved identity
+can resolve multiple candidates but does not replace fresh verification.
+
+See [CONTRIBUTING.md](i2c/CONTRIBUTING.md) for evidence requirements and
+[PROFILES.md](i2c/PROFILES.md) for recipe fields, adapter responsibilities and
+hardware-free checks. Discovery, decode and write-path validation are separate
+claims; a successful read does not establish an effective or restorable write.
 
 ## Profiles and undo points
 

@@ -174,8 +174,8 @@ def main():
             print(f"{name:10} FAILED: {e}")
     # the real app, if importable
     try:
-        import app as legacy_ui
-        import nvbackend
+        from . import app as legacy_ui
+        from . import nvbackend
         legacy_ui._enable_dpi_awareness()
         legacy_ui.SCALE = legacy_ui._detect_scale()
         g = nvbackend.GPU(nvbackend.slot_from_argv())
