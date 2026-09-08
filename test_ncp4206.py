@@ -75,4 +75,3 @@ class NCPTests(unittest.TestCase):
         self.assertIsNotNone(profiles.preflight(gpu,target,r))
 
 if __name__=='__main__':unittest.main()
-
