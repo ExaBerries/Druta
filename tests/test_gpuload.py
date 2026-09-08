@@ -54,6 +54,7 @@ class GpuLoadTests(unittest.TestCase):
             load = make.return_value
             load.error = ""
             load.done.is_set.return_value = False
+            load.workload_ended.is_set.return_value = False
             load.wait_started.return_value = True
             load.stats = {"slot": "0000:02:00.0"}
             result = gpuload.induce(gpu, max_seconds=5, on_settled=lambda: "captured")

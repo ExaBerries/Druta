@@ -218,7 +218,13 @@ class NCP4206(Rail):
         except Exception as exc:
             return False, 'NCP4206 Auto recovery failed: ' + str(exc)
 
-    def verify(self, *, acknowledged=False, ref=None, log=None):
+    def verify(self, *, acknowledged=False, ref=None, log=None, cancelled=None):
+        self._verification_write_attempted = False
+        self._verification_restore_ok = True
+        self._verification_restore_error = ''
+        cancelled = cancelled or (lambda: False)
+        if cancelled():
+            return False, 'NCP4206 verification cancelled; nothing written', []
         if not acknowledged:
             return False, 'I2C verification requires acknowledgment', []
         with self._mutex:
@@ -227,7 +233,11 @@ class NCP4206(Rail):
             def sample(delay):
                 values = []
                 for _ in range(5):
+                    if cancelled():
+                        break
                     time.sleep(delay)
+                    if cancelled():
+                        break
                     values.append(self.read_vout())
                 return values
 
@@ -236,6 +246,8 @@ class NCP4206(Rail):
                            and math.isfinite(v) for v in values)
 
             baseline_samples = sample(.05)
+            if cancelled():
+                return False, 'NCP4206 verification cancelled; nothing written', []
             if not complete(baseline_samples):
                 return False, 'NCP4206 baseline voltage read failed; nothing written', []
             baseline = statistics.median(baseline_samples)
@@ -252,16 +264,24 @@ class NCP4206(Rail):
             result = (False, 'NCP4206 verification did not run', ladder)
             try:
                 for target in targets:
+                    if cancelled():
+                        result = (False, 'NCP4206 verification cancelled', ladder)
+                        break
                     rung = {'baseline_mv': baseline, 'baseline_samples_mv': baseline_samples,
                             'noise_mv': noise, 'threshold_mv': threshold,
                             'target_mv': target, 'samples_mv': [], 'moved': False}
                     ladder.append(rung)
+                    self._verification_write_attempted = True
+                    self._verification_restore_ok = False
                     ok, msg = self.set_voltage_mv(target, acknowledged=True)
                     if not ok:
                         rung['refused'] = msg
                         result = (False, 'NCP4206 verification write refused: ' + msg, ladder)
                         break
                     samples = rung['samples_mv'] = sample(.15)
+                    if cancelled():
+                        result = (False, 'NCP4206 verification cancelled', ladder)
+                        break
                     if not complete(samples):
                         rung['read_failed'] = True
                         result = (False, 'NCP4206 verification voltage read failed', ladder)
@@ -286,9 +306,16 @@ class NCP4206(Rail):
                 result = (False, f'NCP4206 verification failed: {exc}', ladder)
             finally:
                 try:
-                    ok, msg = self.restore_control(original, recovery=True)
+                    ok, msg = (self.restore_control(original, recovery=True)
+                               if self._verification_write_attempted
+                               else (True, 'nothing written'))
                 except Exception as exc:
                     ok, msg = False, str(exc)
+                self._verification_restore_ok = bool(ok)
+                self._verification_restore_error = '' if ok else msg
             if not ok:
-                return False, 'NCP4206 verification restoration failed: ' + msg, ladder
+                return False, ('NCP4206 verification restoration failed: ' + msg
+                               + '; ' + result[1]), ladder
+            if cancelled():
+                return False, 'NCP4206 verification cancelled; original control restored', ladder
             return result

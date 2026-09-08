@@ -154,6 +154,7 @@ class BandwidthLoad:
         self.slot = slot
         self.device_slot = ""
         self.started = threading.Event()   # set once copies are in flight
+        self.workload_ended = threading.Event()  # copying stopped, before CUDA teardown
         self.done = threading.Event()
         self._stop = threading.Event()
         self.error = ""
@@ -250,6 +251,11 @@ class BandwidthLoad:
                         self._hammer(cu, chk, a, b, buf, free_b.value,
                                      total_b.value)
                     finally:
+                        # CUDA frees/context teardown can block after the loop
+                        # has ended. Callbacks need the lifetime of the load,
+                        # not merely the lifetime of its worker thread. Keep
+                        # this around _hammer so subclasses signal it too.
+                        self.workload_ended.set()
                         cu.cuMemFree_v2(b)
                 finally:
                     cu.cuMemFree_v2(a)
@@ -261,6 +267,7 @@ class BandwidthLoad:
         finally:
             # unblock anyone in wait_started() even when the load never got
             # off the ground - otherwise a failure here is a UI hang
+            self.workload_ended.set()
             self.started.set()
             self.done.set()
 
@@ -302,7 +309,7 @@ class BandwidthLoad:
 
 
 def induce(gpu, settle_timeout=15.0, max_seconds=DEFAULT_MAX_SECONDS,
-           on_settled=None, poll=0.4):
+           on_settled=None, poll=0.4, cancelled=None):
     """Run a load, wait for the memory clock to settle, call `on_settled()`
     WHILE THE LOAD IS STILL RUNNING, then stop it.
 
@@ -310,10 +317,37 @@ def induce(gpu, settle_timeout=15.0, max_seconds=DEFAULT_MAX_SECONDS,
     entire point: a capture taken after the load stops is a capture of the card
     coming back down.
 
+    `cancelled`, when supplied, is a callable such as Event.is_set. Cancellation
+    stops startup/settling without entering the callback. A callback that writes
+    settings must also observe cancellation itself and finish its restoration
+    before returning. Cleanup waits for that callback; the workload's hard
+    duration limit still applies and expiry invalidates the result.
+
     Returns a dict: reached/pstate/mem/samples/stats/error.
     """
     out = {"error": "", "mem": None, "pstate": None, "samples": [],
            "stats": {}, "settled": False, "result": None}
+
+    def is_cancelled():
+        if cancelled is not None and cancelled():
+            out["error"] = "GPU load cancelled"
+            return True
+        return False
+
+    def pause(seconds):
+        if cancelled is None:
+            time.sleep(seconds)
+            return False
+        deadline = time.perf_counter() + seconds
+        while not is_cancelled():
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.1, remaining))
+        return True
+
+    if is_cancelled():
+        return out
     try:
         slot = gpu.slot()
         if parse_slot(slot) is None:
@@ -322,16 +356,30 @@ def induce(gpu, settle_timeout=15.0, max_seconds=DEFAULT_MAX_SECONDS,
         out["error"] = f"cannot target the GPU load: {exc}"
         return out
     load = BandwidthLoad(max_seconds=max_seconds, slot=slot)
+
+    def load_ended():
+        return load.workload_ended.is_set() or load.done.is_set()
+
     try:
         load.start()
-        if not load.wait_started(timeout=settle_timeout):
-            out["error"] = load.error or "the GPU load never started"
-            return out
+        deadline = time.perf_counter() + settle_timeout
+        while True:
+            if is_cancelled():
+                return out
+            remaining = max(0.0, deadline - time.perf_counter())
+            wait = min(0.1, remaining) if cancelled is not None else remaining
+            if load.wait_started(timeout=wait):
+                break
+            if load_ended() or time.perf_counter() >= deadline:
+                out["error"] = load.error or "the GPU load never started"
+                return out
         # let the driver notice the work and settle somewhere
         last, stable, t0 = None, 0, time.perf_counter()
         while time.perf_counter() - t0 < settle_timeout:
-            if load.done.is_set() and load.error:
-                out["error"] = load.error
+            if is_cancelled():
+                return out
+            if load_ended():
+                out["error"] = load.error or "the GPU load ended before the callback"
                 return out
             mem, ps = _read(gpu)
             out["samples"].append((round(time.perf_counter() - t0, 2), mem, ps))
@@ -345,10 +393,21 @@ def induce(gpu, settle_timeout=15.0, max_seconds=DEFAULT_MAX_SECONDS,
             else:
                 stable = 0
             last = mem
-            time.sleep(poll)
+            if pause(poll):
+                return out
         out["mem"], out["pstate"] = _read(gpu)
+        if is_cancelled():
+            return out
+        if not out["settled"]:
+            out["error"] = "the GPU memory clock did not settle before the callback"
+            return out
+        if load_ended():
+            out["error"] = load.error or "the GPU load ended before the callback"
+            return out
         if on_settled is not None:
             out["result"] = on_settled()
+            if load_ended():
+                out["error"] = load.error or "the GPU load ended before the callback finished"
     finally:
         # stop and JOIN before returning: the caller is entitled to assume the
         # card is back to its own devices once this returns
@@ -357,6 +416,8 @@ def induce(gpu, settle_timeout=15.0, max_seconds=DEFAULT_MAX_SECONDS,
         out["stats"] = load.stats
         if load.error and not out["error"]:
             out["error"] = load.error
+        if out["stats"].get("hit_deadline") and not out["error"]:
+            out["error"] = "the GPU load reached its hard duration limit"
     return out
 
 

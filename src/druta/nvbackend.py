@@ -39,6 +39,7 @@ example, and vf_lock_self_test() keeps the middle rung runnable on any machine.
 """
 import ctypes
 import json
+import math
 import ntpath
 import os
 import re
@@ -2358,16 +2359,26 @@ class GPU:
         """ctype 0=GRAPHICS (mhz in MHz, snapped to THIS CARD's clock grid),
         2=MEM (mhz in TRUE memory MHz for a known GDDR type, else raw/effective).
         The method converts to the driver's internal units. Reset via 0."""
-        nv = self.nvml
-        if ctype not in (0, 2):
+        if type(ctype) is not int or ctype not in (0, 2):
             return False, "clock offset type must be 0 (core) or 2 (memory)"
+        if type(mhz) not in (int, float):
+            return False, "clock offset must be a finite number, not a bool or string"
+        try:
+            finite = math.isfinite(mhz)
+        except OverflowError:
+            finite = False
+        if not finite:
+            return False, "clock offset must be a finite number"
+        if not -(1 << 31) <= mhz < (1 << 31):
+            return False, "clock offset exceeds the driver's signed 32-bit range"
+        nv = self.nvml
         modern = nv.ok and nv.has("nvmlDeviceSetClockOffsets")
         if not modern and not (self.nvapi.ok
                                and getattr(self.nvapi, "Pstates20Set", None)):
             return False, "clock offset setter is unavailable"
         dom = "core" if ctype == 0 else "mem"
-        mhz = int(mhz)
         if ctype == 0:
+            mhz = int(mhz)
             # The core offset lands in the same per-point VF delta table, so an
             # offset that is not a whole 15 MHz bin de-phases the curve: points
             # cross bin boundaries at different offsets and flats reappear.
@@ -2391,19 +2402,36 @@ class GPU:
             scale, unit = 1, "MHz"
         else:
             scale, unit = self.mem_offset_scale()
-        units = mhz * scale
+            if (type(scale) not in (int, float) or not 0 < scale < (1 << 31)):
+                return False, "memory offset scale is invalid"
+        scaled = mhz * scale
+        if not -(1 << 31) <= scaled < (1 << 31):
+            return False, f"{dom} offset exceeds the driver's signed 32-bit range"
+        units = int(scaled)
+        if units != scaled:
+            return False, (f"{dom} offset {mhz:+g} {unit} is not representable; "
+                           f"use multiples of {1 / scale:g} {unit}")
         rng = self._offset_range(ctype)
+        if modern and ctype == 2 and rng is None:
+            return False, "memory offset range/readback is unavailable; no write issued"
         lo, hi = rng[:2] if rng else ((-1000, 1000) if ctype == 0 else (-2000, 6000))
         if not (lo <= units <= hi):
-            elo, ehi = int(lo / scale), int(hi / scale)
-            return False, f"{dom} offset {mhz:+d} {unit} out of range [{elo}..{ehi}]"
+            elo, ehi = lo / scale, hi / scale
+            return False, f"{dom} offset {mhz:+g} {unit} out of range [{elo:g}..{ehi:g}]"
         if not modern:
             return self._set_pstate20_offset(ctype, units, mhz, unit)
         co = _ClockOffset(version=nv.ver(_ClockOffset, 1), type=ctype,
                           pstate=0, off=units)
         st = nv.dll.nvmlDeviceSetClockOffsets(nv.dev, ctypes.byref(co))
         if st == 0:
-            return True, f"{dom} offset set to {mhz:+d} {unit}"
+            if ctype == 2:
+                readback = self._offset_range(ctype)
+                if readback is None:
+                    return False, "memory offset was sent, but readback failed"
+                if readback[2] != units:
+                    return False, (f"mem offset requested {mhz:+g} {unit}, but the driver "
+                                   f"reported {readback[2] / scale:+g} {unit}")
+            return True, f"{dom} offset set to {mhz:+g} {unit}"
         return False, f"{dom} offset failed: {nv.errstr(st)}"
 
     def _set_pstate20_offset(self, ctype, units, mhz, unit):
@@ -2432,9 +2460,9 @@ class GPU:
         if applied is None:
             return False, f"{dom} offset was sent, but readback failed: {err or 'missing P0 entry'}"
         if applied.delta.value != delta_khz:
-            return False, (f"{dom} offset requested {mhz:+d} {unit}, but the driver "
+            return False, (f"{dom} offset requested {mhz:+g} {unit}, but the driver "
                            f"reported {applied.delta.value * wire_scale / 1000:g} API MHz")
-        return True, f"{dom} offset set to {mhz:+d} {unit} (NVAPI Pstates20)"
+        return True, f"{dom} offset set to {mhz:+g} {unit} (NVAPI Pstates20)"
 
     # ---- per-domain clock offsets (XBAR and friends) ---------------------- #
     # A SECOND, entirely separate offset mechanism from set_clock_offset above.
@@ -3292,6 +3320,16 @@ class GPU:
         refuses to write if anything other than the intended dword differs, so
         a layout change in a future driver turns into a refusal rather than a
         write into whatever now occupies that offset."""
+        if type(domain) is not int or not 0 <= domain < CLKDOM_SLOTS:
+            return False, "clock domain must be an integer control index"
+        if type(mhz) not in (int, float):
+            return False, "clock-domain offset must be a finite number"
+        try:
+            finite = math.isfinite(mhz)
+        except OverflowError:
+            finite = False
+        if not finite or not -(1 << 31) <= mhz * 1000 < (1 << 31):
+            return False, "clock-domain offset exceeds the signed 32-bit kHz range"
         a = self.nvapi
         if not (self.clkdom_ok() and a.ClkDomCtlSet):
             return False, "per-domain clock control unavailable"
@@ -3302,19 +3340,37 @@ class GPU:
             return False, (f"domain {domain} is not one this driver accepts "
                            f"({self.clkdom_domains()})")
         khz = int(round(mhz)) * 1000
+        if not -(1 << 31) <= khz < (1 << 31):
+            return False, "rounded clock-domain offset exceeds the signed 32-bit kHz range"
         wire_khz = khz * self.clkdom_control_polarity(domain)
         mask = 1 << domain
         st, buf = self._clkdom_get(mask)
         if st != 0:
             return False, f"clock-domain read failed (status {st})"
+        def valid_read(block):
+            if ctypes.sizeof(block) < layout.size:
+                return False
+            words = ctypes.cast(block, ctypes.POINTER(u32))
+            return words[0] == layout.version and words[layout.mask_dword] == mask
+
+        if not valid_read(buf):
+            return False, "clock-domain block did not echo its version and requested mask"
+        original = ctypes.string_at(buf, layout.size)
         dw = (layout.header + domain * layout.stride + layout.freq_khz) // 4
         was_wire = ctypes.cast(buf, ctypes.POINTER(i32))[dw]
         was = was_wire * self.clkdom_control_polarity(domain)
-        ctypes.cast(buf, ctypes.POINTER(i32))[dw] = wire_khz
 
         st2, ref = self._clkdom_get(mask)
         if st2 != 0:
             return False, f"verification read failed (status {st2})"
+        if not valid_read(ref):
+            return False, "verification block did not echo its version and requested mask"
+        if ctypes.string_at(ref, layout.size) != original:
+            return False, "clock-domain block changed between reads; no write issued"
+        if was_wire == wire_khz:
+            return True, (f"{self.clkdom_control_label(domain)} offset already "
+                          f"{khz/1000:+.0f} MHz; no write needed")
+        ctypes.cast(buf, ctypes.POINTER(i32))[dw] = wire_khz
         pb = ctypes.cast(buf, ctypes.POINTER(u32))
         pr = ctypes.cast(ref, ctypes.POINTER(u32))
         diffs = [i for i in range(layout.size // 4) if pb[i] != pr[i]]

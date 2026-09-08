@@ -20,6 +20,12 @@ Offset, and the identified I2C regulator's offset. The Load profile list shows
 these settings. Loading also restores XOC mode and enables the rail controls
 needed by the tune; I2C verification runs under load in each new session.
 
+Saving a profile is unavailable until verification and profile application have finished,
+so temporary verification voltages cannot become a saved tune. Loading checks
+the complete saved payload before changing any control. Fractional memory
+offsets are preserved in the driver's supported units, and replaying an
+already-correct clock-domain offset is a successful no-op.
+
 Choose **Load at startup** beside a named profile to apply a saved copy at
 Windows sign-in. Configure this while running Druta as administrator. Selecting
 it again updates that copy; **Disable startup loading** turns it off. The card,
@@ -93,3 +99,11 @@ scan-time telemetry. Choose a candidate when several respond, enable I2C rail,
 and press Verify before Apply. Rescan I2C refreshes discovery and clears the
 verification result; it preserves staged curve edits. Verification is repeated
 after changing GPUs or controllers, and cannot pass if restoration fails.
+
+While Verify is running, the selected controller and risk modes stay fixed.
+Closing Druta cancels verification and waits for the original control state's
+restoration attempt to finish before the process exits. Cancellation cannot
+authorize Apply, and a failed restoration leaves the session marked unclean for
+automatic startup loading. A forced process termination or power loss cannot
+run this cleanup. Ordinary reboot does not necessarily clear I2C settings;
+use the controller's Stock/Auto action or a full power cycle as appropriate.

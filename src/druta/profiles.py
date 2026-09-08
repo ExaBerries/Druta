@@ -283,33 +283,150 @@ def strict_device_error(state, gpu):
     return None
 
 
-def preflight(gpu, state, rail=None):
+def _number(value, label, *, integer=False):
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value)):
+        raise ValueError(f"{label}: non-finite or non-numeric setting")
+    if integer and value != int(value):
+        raise ValueError(f"{label} must be an integer")
+    return value
+
+
+def _vf_deltas(state):
+    """Decode only the serialized indices/values, without truncating bad input."""
+    saved = state.get("vf_deltas")
+    if saved is None:
+        return {}
+    if not isinstance(saved, dict):
+        raise ValueError("V/F deltas must be an index-to-delta mapping")
+    deltas = {}
+    for key, value in saved.items():
+        if isinstance(key, bool) or not isinstance(key, (str, int)):
+            raise ValueError(f"invalid V/F point index {key!r}")
+        try:
+            index = int(key)
+        except (ValueError, OverflowError):
+            raise ValueError(f"invalid V/F point index {key!r}") from None
+        if index < 0 or str(index) != str(key) or index in deltas:
+            raise ValueError(f"invalid or duplicate V/F point index {key!r}")
+        _number(value, f"V/F point {index} delta", integer=True)
+        deltas[index] = int(value)
+    return deltas
+
+
+def _validate_saved_fields(gpu, state):
+    """Reject deterministic payload errors before any setting is changed.
+
+    Missing fields still mean "not captured" for both supported schemas. GPU
+    availability and live read-back checks remain with the individual setters.
+    """
+    for key in ("device", "rail_limits_mv", "clock_domain_offsets_mhz", "i2c"):
+        if state.get(key) is not None and not isinstance(state[key], dict):
+            raise ValueError(f"{key} must be a mapping")
+    for key in ("xoc", "fan_manual", "vf_applicable"):
+        if state.get(key) is not None and not isinstance(state[key], bool):
+            raise ValueError(f"{key} must be a boolean")
+    for key in ("core_off_mhz", "mem_off_true_mhz", "power_limit_mw",
+                "volt_boost_pct", "fan_pct", "nvvdd_offset_mv"):
+        if state.get(key) is not None:
+            _number(state[key], key)
+    core = state.get("core_off_mhz")
+    if core is not None and not -(1 << 31) <= core < (1 << 31):
+        raise ValueError("core offset is outside the driver's representation")
+    memory = state.get("mem_off_true_mhz")
+    if memory is not None:
+        scale = gpu.mem_offset_scale()[0]
+        _number(scale, "memory offset scale")
+        if not 0 < scale < (1 << 31):
+            raise ValueError("memory offset scale is invalid")
+        units = memory * scale
+        if not math.isfinite(units) or not -(1 << 31) <= units < (1 << 31):
+            raise ValueError("memory offset is outside the driver's representation")
+        if units != int(units):
+            raise ValueError("memory offset is not representable in driver units")
+    power = state.get("power_limit_mw")
+    if power:
+        low = gpu.static.get("pl_min_mw", 50000)
+        high = gpu.static.get("pl_max_mw", 400000)
+        if not low <= power <= high:
+            raise ValueError(f"power limit is outside [{low}..{high}] mW")
+    for key in ("volt_boost_pct", "fan_pct"):
+        value = state.get(key)
+        if value is not None and not 0 <= value <= 100:
+            raise ValueError(f"{key} is outside [0..100]%")
+    fans = state.get("fan_control_state")
+    if fans is not None:
+        if (not isinstance(fans, dict) or fans.get("source") not in
+                ("nvml", "nvapi_cooler", "nvapi_client")):
+            raise ValueError("fan snapshot has an unknown control source")
+        rows = fans.get("fans")
+        if not isinstance(rows, list) or not rows:
+            raise ValueError("fan snapshot has no fan list")
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(row.get("manual"), bool):
+                raise ValueError("fan snapshot has an unknown policy")
+            level = _number(row.get("level"), "fan requested level", integer=True)
+            if not 0 <= level <= 100:
+                raise ValueError("fan requested level is outside [0..100]%")
+    deltas = _vf_deltas(state)
+    maximum = getattr(gpu, "MAX_ABS_DELTA_KHZ", 1_000_000)
+    for index, delta in deltas.items():
+        if abs(delta) > maximum:
+            raise ValueError(f"V/F point {index} delta is outside +/-{maximum} kHz")
+    return deltas
+
+
+def preflight(gpu, state, rail=None, *, apply_curve=True):
     """Validate saved private controls before ANY write, including I2C verification.
 
     Old profiles omit these fields and retain their existing restore behaviour.
     No live-voltage telemetry or arbitrary register image is ever replayed.
     """
-    if not isinstance(state, dict) or state.get("schema", 1) not in (1, SCHEMA):
+    if (not isinstance(state, dict) or isinstance(state.get("schema"), bool)
+            or state.get("schema", 1) not in (1, SCHEMA)):
         return "unsupported profile format"
-    if state.get("vf_applicable") is False and vf_applicable(gpu):
-        return "this GPU requires a V/F snapshot; save a fresh profile on this card"
-    if state.get("vf_deltas") and not vf_applicable(gpu):
-        return "V/F curve profiles cannot be applied to this GPU"
-    limits = state.get("rail_limits_mv") or {}
-    offsets = state.get("clock_domain_offsets_mhz") or {}
-    i2c = state.get("i2c")
-    nvvdd = state.get("nvvdd_offset_mv")
-    if not (limits or offsets or i2c or nvvdd is not None):
-        return None
-    error = strict_device_error(state, gpu)
-    if error:
-        return error
     try:
-        def number(v):
-            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
-                raise ValueError("non-finite or non-numeric setting")
-        if "xoc" in state and not isinstance(state["xoc"], bool):
-            raise ValueError("XOC mode must be a boolean")
+        deltas = _validate_saved_fields(gpu, state)
+        applicable = vf_applicable(gpu)
+        if state.get("vf_applicable") is False and applicable:
+            raise ValueError("this GPU requires a V/F snapshot; save a fresh profile on this card")
+        if deltas and not applicable:
+            raise ValueError("V/F curve profiles cannot be applied to this GPU")
+        if deltas and apply_curve:
+            reader = getattr(gpu, "vfp_layout", None)
+            if callable(reader):
+                layout = reader()
+                if layout is None:
+                    raise ValueError("could not determine this card's V/F table layout")
+                invalid = set(deltas) - set(layout.gpu_idx)
+                if invalid:
+                    raise ValueError(f"V/F point indices {sorted(invalid)} are not GPU points on this card")
+        limits = state.get("rail_limits_mv") or {}
+        offsets = state.get("clock_domain_offsets_mhz") or {}
+        i2c = state.get("i2c")
+        nvvdd = state.get("nvvdd_offset_mv")
+        if not (limits or offsets or i2c or nvvdd is not None):
+            return None
+        error = strict_device_error(state, gpu)
+        if error:
+            return error
+        if i2c:
+            if rail is None or rail.p.read_only:
+                raise ValueError("saved I2C regulator is not available")
+            if any(i2c.get(k) != v for k, v in rail_identity(rail).items()):
+                raise ValueError("I2C regulator/profile/limits changed; save a fresh profile")
+            if getattr(rail, "absolute_voltage", False):
+                if "offset_mv" in i2c:
+                    raise ValueError("absolute I2C voltage cannot load an offset")
+                rail.validate_control(i2c.get("control"), xoc=bool(state.get("xoc")))
+            else:
+                if "control" in i2c:
+                    raise ValueError("offset I2C regulator cannot load absolute voltage")
+                ok, message = rail.validate_offset_mv(i2c.get("offset_mv"), xoc=bool(state.get("xoc")))
+                if not ok:
+                    raise ValueError(message)
+            if not rail.present():
+                raise ValueError("saved I2C regulator is not available")
         if limits:
             if not gpu.volt_rail_limits_supported():
                 raise ValueError("per-rail limits are not supported on this GPU/driver")
@@ -317,17 +434,16 @@ def preflight(gpu, state, rail=None):
             maximum = (getattr(gpu, "VOLT_LIMIT_XOC_MAX_MV", 1500) if state.get("xoc")
                        else getattr(gpu, "VOLT_LIMIT_MAX_MV", 1200))
             for key, values in limits.items():
-                if key not in ("0", "1") or not values:
+                if key not in ("0", "1") or not isinstance(values, dict) or not values:
                     raise ValueError("invalid voltage rail")
                 if set(values) - set(gpu.volt_rail_limit_fields(int(key))):
                     raise ValueError(f"unconfirmed limit field on rail {key}")
                 for field, value in values.items():
-                    number(value)
+                    _number(value, f"rail {key} {field}")
                     bound = max(maximum, gpu.abs_limit_mv(current[int(key)], field))
                     if not getattr(gpu, "VOLT_LIMIT_MIN_MV", 300) <= value <= bound:
                         raise ValueError(f"rail {key} {field} is outside the saved mode's voltage bounds")
         if nvvdd is not None:
-            number(nvvdd)
             current = gpu.read_rail_offset_mv(0)
             if current is None:
                 raise ValueError("NVVDD offset is not readable on this GPU/driver")
@@ -339,20 +455,10 @@ def preflight(gpu, state, rail=None):
             for key, value in offsets.items():
                 if str(int(key)) != key or int(key) not in controls:
                     raise ValueError(f"unconfirmed clock control {key}")
-                number(value)
-        if i2c:
-            if rail is None or rail.p.read_only or not rail.present():
-                raise ValueError("saved I2C regulator is not available")
-            if any(i2c.get(k) != v for k, v in rail_identity(rail).items()):
-                raise ValueError("I2C regulator/profile/limits changed; save a fresh profile")
-            if getattr(rail, "absolute_voltage", False):
-                if "offset_mv" in i2c:
-                    raise ValueError("absolute I2C voltage cannot load an offset")
-                rail.validate_control(i2c.get("control"), xoc=bool(state.get("xoc")))
-            else:
-                if "control" in i2c:
-                    raise ValueError("offset I2C regulator cannot load absolute voltage")
-                number(i2c["offset_mv"])
+                _number(value, f"clock control {key}")
+                if (not -(1 << 31) <= value * 1000 < (1 << 31)
+                        or not -(1 << 31) <= round(value) * 1000 < (1 << 31)):
+                    raise ValueError(f"clock control {key} is outside the driver's representation")
     except Exception as e:
         return str(e)
     return None
@@ -462,12 +568,23 @@ def restore(gpu, state, apply_curve=True, *, rail=None, i2c_verified=False):
     Voltage failures stop before clocks; other knob failures are reported.
     The caller enables the profile's displayed rail/XOC modes before calling.
     """
-    error = preflight(gpu, state, rail)
+    error = preflight(gpu, state, rail, apply_curve=apply_curve)
     if error:
         return [(False, f"profile not applied: {error}")]
     if state.get("i2c") and not i2c_verified:
         return [(False, "profile not applied: I2C must be verified in this session first")]
     results = []
+    try:
+        return _restore_validated(gpu, state, apply_curve, rail, results)
+    except Exception as e:
+        # An unexpected failure between steps must not erase the record of
+        # settings already changed. Stop here; the caller can show every result.
+        results.append((False, f"profile stopped after an unexpected error: {e}"))
+        return results
+
+
+def _restore_validated(gpu, state, apply_curve, rail, results):
+    deltas = _vf_deltas(state)
 
     def step(label, fn):
         try:
@@ -515,7 +632,7 @@ def restore(gpu, state, apply_curve=True, *, rail=None, i2c_verified=False):
 
     mm = state.get("mem_off_true_mhz")
     if mm is not None:
-        step("mem offset", lambda: gpu.set_clock_offset(2, int(round(mm))))
+        step("mem offset", lambda: gpu.set_clock_offset(2, mm))
 
     co = state.get("core_off_mhz")
     if co is not None:
@@ -559,8 +676,7 @@ def restore(gpu, state, apply_curve=True, *, rail=None, i2c_verified=False):
 
     # LAST, and authoritative: the delta table subsumes the core offset above.
     if apply_curve and vf_applicable(gpu):
-        if state.get("vf_deltas"):
-            deltas = {int(k): int(v) for k, v in state["vf_deltas"].items()}
+        if deltas:
             step("v/f curve", lambda: gpu.apply_vf_deltas(deltas))
         else:
             # NOT silence. Skipping the one table an undo point exists to
@@ -580,7 +696,7 @@ def summarize(state):
         bits.append(f"core {co:+d} MHz")
     mm = state.get("mem_off_true_mhz")
     if isinstance(mm, (int, float)):
-        bits.append(f"mem {int(round(mm)):+d} MHz")
+        bits.append(f"mem {mm:+g} MHz")
     mw = state.get("power_limit_mw")
     if mw:
         bits.append(f"PL {int(mw) // 1000} W")
