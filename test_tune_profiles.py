@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import profiles
+from railctl import Rail
 from druta import Druta
 
 
@@ -25,8 +26,10 @@ def hardware():
         read=Mock(return_value=dict(core_off=90, mem_off=800, pl_now_mw=300000)),
         mem_offset_scale=Mock(return_value=(8, "true MHz")),
         read_voltage_boost=Mock(return_value=100),
-        read_fan_control_state=Mock(return_value={"fans": [{"manual": True, "level": 75}]}),
+        read_fan_control_state=Mock(return_value={"source": "nvml", "fans": [
+            {"id": 0, "manual": True, "level": 75, "policy": 1}]}),
         read_vf_curve=Mock(return_value=([dict(idx=0, delta_khz=30000)], None)),
+        vfp_layout=Mock(return_value=SimpleNamespace(gpu_idx=(0,))),
         voltage_xoc_enabled=True,
         read_volt_rail_limits=Mock(return_value={0: fields, 1: copy.deepcopy(fields)}),
         volt_rail_limit_fields=Mock(return_value=("reliability", "alt_reliability", "overvoltage", "vmin")),
@@ -43,10 +46,13 @@ def hardware():
                   "restore_fan_control_state", "apply_vf_deltas"):
         setattr(gpu, label, writer(label))
     rail = SimpleNamespace(p=SimpleNamespace(src={"limits": {"ceiling": 1200}},
-                           name="test regulator", rail="NVVDD", port=1, read_only=False),
+                           name="test regulator", rail="NVVDD", port=1, read_only=False,
+                           wreg=0x23, writable={0x23}, never={}, lsb_mv=6.25,
+                           raw_min=-128, raw_max=127, env_min=-200, env_max=100),
                            addr7=0x20, present=Mock(return_value=True),
                            telemetry=Mock(return_value={"offset_mv": 18.75, "vout_mv": 1100}),
                            plan=writer("I2C plan"), set_offset_mv=writer("I2C offset"))
+    rail.validate_offset_mv = lambda mv, **kw: Rail.validate_offset_mv(rail, mv, **kw)
     return gpu, rail, calls
 
 

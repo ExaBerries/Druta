@@ -43,6 +43,7 @@ many stock boards that bus is not routed to the GPU at all, which is why a
 profile is inert until its identity read passes on the actual hardware.
 """
 import ctypes
+import math
 import os
 import sys
 import time
@@ -437,8 +438,8 @@ class Rail:
         self.xoc = False
         return True, "XOC off - the profile's envelope is restored"
 
-    def _envelope(self):
-        if self.xoc:
+    def _envelope(self, xoc=None):
+        if (self.xoc if xoc is None else xoc):
             return (float("-inf"), float("inf"), float("inf"),
                     (300.0, self.p.sanity_rail))
         return (self.p.env_min, self.p.env_max, self.p.ceiling,
@@ -456,7 +457,36 @@ class Rail:
         """
         return self.set_offset_mv(mv, acknowledged=True, dry_run=True)
 
-    def set_offset_mv(self, mv, *, acknowledged=False, dry_run=False):
+    def validate_offset_mv(self, mv, *, xoc=False):
+        """Check a saved/requested offset without reading or writing the bus."""
+        p = self.p
+        if (not isinstance(mv, (int, float)) or isinstance(mv, bool)
+                or not math.isfinite(mv)):
+            return False, "refused: offset must be a finite number of millivolts"
+        if p.read_only:
+            return False, f"refused: the {p.name} profile is read-only"
+        if p.wreg not in p.writable:
+            return False, f"refused: 0x{p.wreg:02X} is not a whitelisted register"
+        if p.wreg in p.never:
+            return False, f"refused: 0x{p.wreg:02X} is permanently denied"
+        if abs(mv) > SANITY_MAX_ABS_OFFSET_MV:
+            return False, (f"REFUSED AS A TYPO: {mv:+.2f} mV exceeds the "
+                           f"{SANITY_MAX_ABS_OFFSET_MV:.0f} mV absolute offset bound")
+        steps = int(round(mv / p.lsb_mv))
+        if not p.raw_min <= steps <= p.raw_max:
+            return False, (f"refused: {mv:+.2f} mV is raw {steps:+d}, outside "
+                           f"the register's representable [{p.raw_min:+d}, "
+                           f"{p.raw_max:+d}] range")
+        if not xoc and not p.env_min <= mv <= p.env_max:
+            return False, (f"refused: {mv:+.2f} mV outside this profile's "
+                           f"[{p.env_min:+.0f}, {p.env_max:+.0f}] mV envelope")
+        return True, "offset is within the static register and mode bounds"
+
+    def set_offset_mv(self, mv, *, acknowledged=False, dry_run=False, _xoc=None):
+        # Verification restores using its entry policy even if an API caller
+        # changes XOC meanwhile. This private override never changes live mode;
+        # identity, whitelist, representability, telemetry and readback remain.
+        xoc = self.xoc if _xoc is None else _xoc
         p = self.p
         if not acknowledged:
             return False, ("refused: the rail offset writes the VRM directly "
@@ -502,8 +532,8 @@ class Rail:
                            f"move the WRONG WAY. No mode removes this - it is "
                            f"what the register can hold, not a policy.")
 
-        lo_mv, hi_mv, ceiling, band = self._envelope()
-        tag = "  [XOC - envelope removed]" if self.xoc else ""
+        lo_mv, hi_mv, ceiling, band = self._envelope(xoc)
+        tag = "  [XOC - envelope removed]" if xoc else ""
         if not (lo_mv <= mv <= hi_mv):
             return False, (f"refused: {mv:+.2f} mV outside this profile's "
                            f"[{lo_mv:+.0f}, {hi_mv:+.0f}] mV envelope. XOC "
@@ -534,7 +564,7 @@ class Rail:
                            f"XOC removes this ceiling.")
 
         if dry_run:
-            cap = "none" if self.xoc else f"{ceiling:.0f} mV"
+            cap = "none" if xoc else f"{ceiling:.0f} mV"
             return True, (f"WOULD write {applied:+.2f} mV (raw {steps:+d}): "
                           f"base {base:.2f} mV -> predicted {predicted:.2f} "
                           f"mV, ceiling {cap}. Nothing was written.{tag}")
@@ -640,7 +670,7 @@ class Rail:
         return med, (max(xs) - min(xs))
 
     def verify(self, *, acknowledged=False, log=None, ref=None,
-               allow_idle=False):
+               allow_idle=False, cancelled=None):
         """Climb the smallest offsets that could move the rail until one does.
 
         WHY A LADDER AND NOT A SINGLE WRITE. This is how a volt mod is proven on
@@ -666,6 +696,12 @@ class Rail:
         finally, and the restore is verified.
         """
         self._verification_write_attempted = False
+        self._verification_restore_ok = True
+        self._verification_restore_error = ""
+        cancelled = cancelled or (lambda: False)
+        if cancelled():
+            return False, "verification cancelled; nothing written", []
+        entry_xoc = bool(getattr(self, "xoc", False))
         p = self.p
         if not acknowledged:
             return False, ("refused: verification writes real offsets to the "
@@ -701,6 +737,8 @@ class Rail:
                 log(m)
 
         base, noise = self._sample(ref=ref)
+        if cancelled():
+            return False, "verification cancelled; nothing written", []
         if base is None and ref is not None:
             say("GPU voltage readback unavailable - falling back to the raw "
                 "rail, which needs a bigger step to clear idle wander")
@@ -717,7 +755,14 @@ class Rail:
         restore_errors = []
         try:
             for rung in p.rungs:
+                if cancelled():
+                    failure = "verification cancelled"
+                    break
+                if bool(getattr(self, "xoc", False)) != entry_xoc:
+                    failure = "verification stopped: XOC mode changed"
+                    break
                 self._verification_write_attempted = True
+                self._verification_restore_ok = False
                 ok, msg = self.set_offset_mv(entry_mv + rung,
                                              acknowledged=True)
                 if not ok:
@@ -735,7 +780,16 @@ class Rail:
                     break
 
                 time.sleep(VERIFY_SETTLE_S)
+                if cancelled():
+                    failure = "verification cancelled"
+                    break
                 now, _pp = self._sample(ref=ref)
+                if cancelled():
+                    failure = "verification cancelled"
+                    break
+                if bool(getattr(self, "xoc", False)) != entry_xoc:
+                    failure = "verification stopped: XOC mode changed"
+                    break
                 if now is None:
                     ladder.append({"rung_mv": rung, "read_failed": True})
                     say(f"  {rung:+6.2f} mV  rail read failed")
@@ -765,7 +819,13 @@ class Rail:
             # restoration verdict. A measured response cannot authorize Apply
             # while the entry setting is unconfirmed.
             try:
-                rok, rmsg = self.set_offset_mv(entry_mv, acknowledged=True)
+                restore_policy = ({"_xoc": entry_xoc}
+                                  if bool(getattr(self, "xoc", False)) != entry_xoc
+                                  else {})
+                rok, rmsg = (self.set_offset_mv(entry_mv, acknowledged=True,
+                                               **restore_policy)
+                             if self._verification_write_attempted
+                             else (True, "nothing written"))
                 if not rok:
                     restore_errors.append(f"restore refused: {rmsg}")
             except Exception as exc:                            # noqa: BLE001
@@ -782,11 +842,17 @@ class Rail:
                         f"restore readback {seen}, expected field 0x{want:X}")
             except Exception as exc:                            # noqa: BLE001
                 restore_errors.append(f"restore readback raised {exc!r}")
+            self._verification_restore_ok = not restore_errors
+            self._verification_restore_error = "; ".join(restore_errors)
             if restore_errors:
                 say("RESTORE FAILED: " + "; ".join(restore_errors))
             else:
                 say(f"restored to {entry_mv:+.2f} mV")
 
+        if cancelled():
+            failure = "verification cancelled" + (f"; {failure}" if failure else "")
+        elif bool(getattr(self, "xoc", False)) != entry_xoc:
+            failure = "verification stopped: XOC mode changed"
         if restore_errors:
             return False, (
                 "RESTORE FAILED - verification is invalid; treat the rail as "

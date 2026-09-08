@@ -303,6 +303,12 @@ class Druta:
         self._i2c_verified = False
         self._i2c_verified_for = None
         self._i2c_busy = False
+        self._i2c_thread = None
+        self._i2c_cancel = threading.Event()
+        self._i2c_modes = {}
+        self._i2c_ui_pending = False
+        self._i2c_restore_failed = False
+        self._closing = False
         # The regulator this card actually has, or None. Discovered by an
         # identity read on the bus rather than by card name, so it is a
         # property of the board in the slot and must be re-found on a swap.
@@ -485,7 +491,8 @@ class Druta:
 
     def guard(self):
         """True if writes are permitted."""
-        if getattr(getattr(self, "_startup_manager", None), "ending", False):
+        if (getattr(self, "_closing", False)
+                or getattr(getattr(self, "_startup_manager", None), "ending", False)):
             return False
         if getattr(self, "_profile_pending", None):
             self.log("profile load is waiting for I2C verification", False)
@@ -1031,7 +1038,9 @@ class Druta:
         # limit is enforced on the number it believes, which is why the real
         # ceiling is shown too. See shuntmod.
         pw = d.get("power_w")
-        lim = d.get("pl_now_mw", 0) // 1000
+        limit_mw = d.get("pl_now_mw")
+        lim = limit_mw / 1000 if limit_mw is not None and limit_mw > 0 else None
+        limit_text = f"limit {lim:.0f} W" if lim is not None else "limit unavailable"
         sh = self.shunt
         if sh.active and pw is not None:
             dpg.set_value("t_pwr", f"{sh.apply(pw):.0f}")
@@ -1040,11 +1049,12 @@ class Druta:
                 "s_pwr",
                 f"raw {pw:.0f} W x{sh.factor:.4g}"
                 + ("" if sh.exact else " est")
-                + f"\nlimit {lim} W = {lim * sh.factor:.0f} W real")
+                + "\n" + limit_text
+                + (f" = {lim * sh.factor:.0f} W real" if lim is not None else ""))
         else:
             dpg.set_value("t_pwr", f"{pw:.0f}" if pw is not None else "--")
             dpg.configure_item("t_pwr", color=ACCENT)
-            dpg.set_value("s_pwr", f"limit {lim} W")
+            dpg.set_value("s_pwr", limit_text)
         vc = d.get("vcore_mv")
         dpg.set_value("t_vcore", f"{vc:.0f}" if vc is not None else "--")
 
@@ -1062,9 +1072,9 @@ class Druta:
         # TDP used = actual draw / the limit currently enforced. The old
         # "PL tgt" bar showed the limit SETTING (a constant 123%), which told
         # you nothing about how hard the card is working.
-        lim_w = (d.get("pl_now_mw") or 0) / 1000.0
-        draw_w = d.get("power_w") or 0.0
-        tdp_pct = (draw_w / lim_w * 100.0) if lim_w > 0 else 0.0
+        lim_w, draw_w = lim, pw
+        power_known = lim_w is not None and draw_w is not None
+        tdp_pct = draw_w / lim_w * 100.0 if power_known else 0.0
         vals = {"gpu": d.get("pwr_gpu_pct", 0), "board": d.get("pwr_board_pct", 0),
                 "tdp": tdp_pct, "ugpu": d.get("util_gpu", 0),
                 "ufb": d.get("util_fb", 0), "uvid": d.get("util_vid", 0),
@@ -1079,7 +1089,8 @@ class Druta:
             if key == "tdp":
                 dpg.configure_item(
                     f"bar_{key}",
-                    overlay=f"{tdp_pct:.0f}%   {draw_w:.0f} / {lim_w:.0f} W")
+                    overlay=(f"{tdp_pct:.0f}%   {draw_w:.0f} / {lim_w:.0f} W"
+                             if power_known else "power / limit unavailable"))
             else:
                 dpg.configure_item(f"bar_{key}", overlay=f"{v:.0f}%")
 
@@ -1098,7 +1109,7 @@ class Druta:
                            for i, (duty, rpm) in enumerate(fans)) or "--"
         mscale, munit = self.gpu.mem_offset_scale()
         moff = d.get("mem_off", 0)
-        mdisp = int(moff / mscale) if isinstance(moff, int) else 0
+        mdisp = moff / mscale if isinstance(moff, (int, float)) else 0
         # BOTH lock mechanisms, read back from the driver rather than from this
         # app's own record - so a lock set by another tuner, or left behind by
         # an earlier run, shows up here even though nothing in this session
@@ -1110,7 +1121,7 @@ class Druta:
         dpg.set_value("state",
                       f"energy {d.get('energy_j',0):.0f} J\n{fantxt}\n"
                       f"offsets: core {d.get('core_off',0):+d} MHz   "
-                      f"mem {mdisp:+d} {munit}\n"
+                      f"mem {mdisp:+g} {munit}\n"
                       f"volt-boost {d.get('vboost_pct','--')}%   "
                       f"VF-locked {d.get('vf_locked_domains') or 'none'}"
                       + (f" (asked {vfmv:.2f} mV)" if vfmv else "")
@@ -1360,7 +1371,7 @@ class Druta:
         directly: a second path to the same register is how the button and the
         slider end up disagreeing about what was written.
         """
-        if getattr(self, "_profile_pending", None):
+        if getattr(self, "_profile_pending", None) or getattr(self, "_i2c_busy", False):
             return
         if key == "i2crail" and getattr(self.rail, "requires_verification", False):
             if self.guard():
@@ -1396,7 +1407,7 @@ class Druta:
             cb(val)
 
     def apply_vlim_reset(self):
-        if getattr(self, "_profile_pending", None):
+        if getattr(self, "_profile_pending", None) or getattr(self, "_i2c_busy", False):
             return
         ok, msg = self.gpu.reset_volt_rail_limits()
         self.log(msg, ok)
@@ -1591,6 +1602,11 @@ class Druta:
 
     def sync_risk_ui(self):
         """Tint the Control tab and raise the banner for the current score."""
+        if getattr(self, "_i2c_busy", False) or getattr(self, "_profile_pending", None):
+            # Disabled widgets can still have an already queued callback. Put
+            # the displayed modes back without touching the controller policy.
+            self.sync_verification_ui()
+            return
         live = self.risk_features()
         score = sum(RISK_WEIGHT[f] for f in live)
         band = risk_band(score)
@@ -1806,7 +1822,7 @@ class Druta:
                                    width=self.s(110), height=self.s(28))
                     self._ctl_widgets.append("go_p0release")
             dpg.add_text("writes ENABLED - untick for read-only. "
-                         "All changes are reversible and reset on reboot",
+                         "I2C changes can persist through reboot; use Reset or power off",
                          tag="unlock_note", color=DIM)
             dpg.add_separator()
 
@@ -1907,8 +1923,8 @@ class Druta:
                                 mscale, munit = self.gpu.mem_offset_scale()
                                 mlo, mhi = -500, 1500
                                 if st.get("mem_off_range"):
-                                    mlo = int(st["mem_off_range"][0] / mscale)
-                                    mhi = int(st["mem_off_range"][1] / mscale)
+                                    mlo = st["mem_off_range"][0] / mscale
+                                    mhi = st["mem_off_range"][1] / mscale
                                 # Same envelope, through the same scale conversion the
                                 # normal bounds use - the backend compares NVML units, so
                                 # the bound has to be divided down into the units this
@@ -1920,8 +1936,8 @@ class Druta:
                                     mem_xhi = st["mem_off_range"][1]
                                 self.slider_row("mem", f"Memory offset ({munit})",
                                                 mlo, mhi, 0, self.apply_mem,
-                                                xoc_lo=int(mem_xlo / mscale),
-                                                xoc_hi=int(mem_xhi / mscale),
+                                                xoc_lo=mem_xlo / mscale,
+                                                xoc_hi=mem_xhi / mscale,
                                                 extra=("Stock",
                                                        lambda: self.stock_knob("mem")))
 
@@ -2197,10 +2213,10 @@ class Druta:
                 # identically, and that neither disturbs the bar itself,
                 # min/max_value, clamped, or set_value/get_value, so " " was
                 # kept as the one that also works on builds where "" does not.
-                dpg.add_slider_int(tag=f"sl_{key}", label="", default_value=init,
-                                   min_value=lo, max_value=hi, clamped=True,
-                                   width=-1, format=" ",
-                                   callback=lambda: self.knob_dragged(key))
+                slider = dpg.add_slider_float if key == "mem" else dpg.add_slider_int
+                slider(tag=f"sl_{key}", label="", default_value=init,
+                       min_value=lo, max_value=hi, clamped=True,
+                       width=-1, format=" ", callback=lambda: self.knob_dragged(key))
                 # Per-slider subtext deliberately suppressed - the tab was one
                 # paragraph of grey text under every knob. `note` stays a
                 # parameter so no call site breaks; the wording itself now
@@ -2217,10 +2233,12 @@ class Druta:
             # clamped - a typed 5000 must not survive as a displayed 5000.
             # step=0 drops DPG's +/- buttons, which would eat most of a cell
             # this narrow.
-            dpg.add_input_int(tag=f"in_{key}", label="", default_value=init,
-                              min_value=lo, max_value=hi, min_clamped=True,
-                              max_clamped=True, step=0, width=-1,
-                              callback=lambda: self.knob_typed(key))
+            input_box = dpg.add_input_float if key == "mem" else dpg.add_input_int
+            input_box(tag=f"in_{key}", label="", default_value=init,
+                      min_value=lo, max_value=hi, min_clamped=True,
+                      max_clamped=True, step=0, width=-1,
+                      **({"format": "%.9g"} if key == "mem" else {}),
+                      callback=lambda: self.knob_typed(key))
             # what the card is MEASURED to be doing for this knob, kept beside
             # the value being asked for (refresh_control fills it). Its cell
             # sits before Apply because rows differ in whether they have an
@@ -2282,7 +2300,13 @@ class Druta:
             return
         self._knob_sync = True
         try:
-            dpg.set_value(f"in_{key}", int(dpg.get_value(f"sl_{key}")))
+            value = dpg.get_value(f"sl_{key}")
+            value = self.memory_offset_value(value) if key == "mem" else int(value)
+            if key == "mem":
+                dpg.set_value(f"sl_{key}", value)
+            dpg.set_value(f"in_{key}", value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            self.log(f"{key} input: {exc}", False)
         finally:
             self._knob_sync = False
 
@@ -2295,10 +2319,18 @@ class Druta:
         b = self.knob_bounds(key)
         if b is None:
             return
-        v = max(b[0], min(b[1], int(dpg.get_value(f"in_{key}"))))
+        value = dpg.get_value(f"in_{key}")
+        try:
+            value = self.memory_offset_value(value) if key == "mem" else int(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            self.log(f"{key} input: {exc}", False)
+            return
+        v = max(b[0], min(b[1], value))
         self._knob_sync = True
         try:
             dpg.set_value(f"sl_{key}", v)
+            if key == "mem":
+                dpg.set_value(f"in_{key}", v)
         finally:
             self._knob_sync = False
 
@@ -2322,8 +2354,9 @@ class Druta:
                     continue
                 if dpg.is_item_focused(box) or dpg.is_item_active(box):
                     continue
-                v = int(dpg.get_value(sl))
-                if int(dpg.get_value(box)) != v:
+                number = float if key == "mem" else int
+                v = number(dpg.get_value(sl))
+                if number(dpg.get_value(box)) != v:
                     dpg.set_value(box, v)
         finally:
             self._knob_sync = False
@@ -2368,7 +2401,8 @@ class Druta:
                 lo, hi = min(lo, r.xoc_lo), max(hi, r.xoc_hi)
             # Value first, bounds second. Narrowing the other way round leaves
             # a frame in which the widget holds a value outside its own range.
-            was = int(dpg.get_value(f"sl_{key}"))
+            number = float if key == "mem" else int
+            was = number(dpg.get_value(f"sl_{key}"))
             now = max(lo, min(hi, was))
             if now != was:
                 dpg.set_value(f"sl_{key}", now)
@@ -2387,7 +2421,9 @@ class Druta:
         stock' stays live on purpose - it only ever moves toward stock; 'Reset
         curve to stock' is a whole-table write that also discards staged
         edits, so it is gated with the rest."""
-        on = self.unlocked() and not getattr(self, "_profile_pending", None)
+        self.sync_verification_ui()
+        on = (self.unlocked() and not getattr(self, "_profile_pending", None)
+              and not getattr(self, "_i2c_busy", False))
         fan_caps = self.gpu.fan_capabilities()
         fan_manual = fan_caps["manual"]
         fan_auto = fan_caps["auto"]
@@ -2405,8 +2441,8 @@ class Druta:
                 dpg.configure_item(tag, enabled=on and available)
         if dpg.does_item_exist("unlock_note"):
             dpg.set_value("unlock_note",
-                          "writes ENABLED - untick for read-only. All changes "
-                          "are reversible and reset on reboot" if on else
+                          "writes ENABLED - untick for read-only. I2C changes "
+                          "can persist through reboot; use Reset or power off" if on else
                           "READ-ONLY - every write control below is disabled"
                           + (" (curve edits are still staged, not written)"
                              if self.vf_applicable() else ""))
@@ -2443,9 +2479,28 @@ class Druta:
         self.autosave_before("core-offset")
         self.report(self.gpu.set_clock_offset(0, mhz))
 
+    def memory_offset_value(self, value):
+        """Snap user input to one representable driver unit, in the UI's scale."""
+        scale = self.gpu.mem_offset_scale()[0]
+        if isinstance(value, bool):
+            raise ValueError("memory offset must be a number, not a boolean")
+        value = float(value)
+        if not math.isfinite(value) or not math.isfinite(scale) or scale <= 0:
+            raise ValueError("memory offset and its scale must be finite")
+        return round(value * scale) / scale
+
     def apply_mem(self, v):
-        if self.guard():
-            self.report(self.gpu.set_clock_offset(2, int(v)))
+        if not self.guard():
+            return
+        try:
+            value = self.memory_offset_value(v)
+        except (TypeError, ValueError, OverflowError) as exc:
+            self.log(f"memory offset: {exc}", False)
+            return
+        for tag in ("sl_mem", "in_mem"):
+            if dpg.does_item_exist(tag):
+                dpg.set_value(tag, value)
+        self.report(self.gpu.set_clock_offset(2, value))
 
     def i2c_rail_text(self, vc):
         """Measured rail, and its disagreement with the GPU's own reading."""
@@ -2635,6 +2690,55 @@ class Druta:
                            f"something moved on the bus, or a link came off")
         return True, ""
 
+    def sync_verification_ui(self):
+        """Keep captured modes and snapshot controls fixed while Verify owns them."""
+        busy = bool(getattr(self, "_i2c_busy", False)
+                    or getattr(self, "_profile_pending", None))
+        if busy:
+            for tag, value in getattr(self, "_i2c_modes", {}).items():
+                if dpg.does_item_exist(tag):
+                    dpg.set_value(tag, value)
+        for tag in ("unlock", "xoc_mode", "i2c_mode", "vlim_mode",
+                    "mi_save_profile", "go_save_profile", "go_open_save_profile",
+                    "prof_name", "tw_apply", "tw_restore", "tim_read"):
+            if dpg.does_item_exist(tag):
+                dpg.configure_item(tag, enabled=not busy)
+
+    def shutdown_is_clean(self):
+        worker = getattr(self, "_i2c_thread", None)
+        return not (getattr(self, "_i2c_busy", False)
+                    or (worker is not None and worker.is_alive())
+                    or getattr(self, "_i2c_restore_failed", False)
+                    or getattr(self, "_profile_pending", None)
+                    or getattr(self, "_profile_applying", False))
+
+    def stop_i2c_verification(self):
+        """Cancel, then wait for restoration while UI and logging still exist."""
+        self._closing = True
+        worker = getattr(self, "_i2c_thread", None)
+        if worker is not None and worker.is_alive():
+            self._i2c_cancel.set()
+            self.invalidate_i2c_verification()
+            try:
+                self.log("closing: waiting for I2C verification to restore the controller", None)
+            finally:
+                # No timeout/daemon escape: returning with a provisional VRM
+                # write would abandon the only owner of its original state.
+                worker.join()
+                # Cancellation may have raced the last result assignment.
+                self.invalidate_i2c_verification()
+        if getattr(self, "_i2c_restore_failed", False):
+            _tell("I2C verification restoration failed: "
+                  + getattr(self, "_i2c_restore_error", "entry setting unconfirmed")
+                  + "\n\nThe controller may still hold a temporary setting. "
+                  "Check its state before applying another profile. "
+                  "This session will not authorize automatic startup loading.")
+        pending = getattr(self, "_profile_pending", None)
+        if pending:
+            self._profile_pending = None
+            self.invalidate_i2c_verification()
+            self.profile_failure("window closed; pending profile was not applied", pending[2])
+
     def verify_i2c_rail(self):
         """Prove the write path reaches the rail before trusting the knob.
 
@@ -2647,6 +2751,9 @@ class Druta:
         if self._i2c_busy:
             self.log("rail verification already running", False)
             return
+        if getattr(self, "_tim_busy", False):
+            self.log("wait for the timing capture or GPU load before verifying the rail", False)
+            return
         if not self.guard():
             return
         ok, why = self.i2c_gate()
@@ -2658,48 +2765,95 @@ class Druta:
             self.log("verify: " + msg, False)
             return
         self._i2c_busy = True
+        self._i2c_ui_pending = True
         self.invalidate_i2c_verification()
-        self.log("verifying the rail write path under load - the card will be "
-                 "busy for a few seconds and the offset is restored after", None)
-        threading.Thread(target=self._i2c_verify_worker, daemon=True,
-                         name="i2c-verify").start()
+        try:
+            self._i2c_cancel = threading.Event()
+            self._i2c_modes = {tag: bool(dpg.get_value(tag))
+                               for tag in ("unlock", "xoc_mode", "i2c_mode", "vlim_mode")
+                               if dpg.does_item_exist(tag)}
+            # A checkbox's value can change before its queued callback runs.
+            # Capture the applied backend modes so a later callback cannot
+            # make the UI claim an envelope that the verifier did not use.
+            if "xoc_mode" in self._i2c_modes:
+                self._i2c_modes["xoc_mode"] = bool(self.rail.xoc)
+            if "vlim_mode" in self._i2c_modes:
+                self._i2c_modes["vlim_mode"] = bool(
+                    getattr(self.gpu, "volt_limits_write_enabled", False))
+            # Capture ownership before dispatch, not after the new thread
+            # happens to run. Shutdown retains this thread until finally ends.
+            worker = threading.Thread(target=self._i2c_verify_worker, daemon=False,
+                                      name="i2c-verify",
+                                      args=(self.gpu, self.rail, self.i2c_connection(),
+                                            self._i2c_cancel))
+            self._i2c_thread = worker
+            self.sync_lock_ui()
+            self.log("verifying the rail write path under load - the card will be "
+                     "busy for a few seconds and the entry setting is restored after", None)
+            worker.start()
+        except Exception as exc:
+            self._i2c_busy = False
+            self._i2c_thread = None
+            self.sync_lock_ui()
+            self.log(f"verify could not start: {exc}", False)
 
-    def _i2c_verify_worker(self):
+    def _i2c_verify_worker(self, gpu=None, rail=None, connection=None, cancel=None):
         # Bound to the Rail captured at start, so a card swap mid-run cannot
         # redirect the restore write at a different board's bus.
-        gpu, rail, res = self.gpu, self.rail, {}
-        connection = self.i2c_connection()
+        gpu = self.gpu if gpu is None else gpu
+        rail = self.rail if rail is None else rail
+        connection = self.i2c_connection() if connection is None else connection
+        cancel = cancel if cancel is not None else threading.Event()
+        res = {}
         self.invalidate_i2c_verification()
         rail._verification_write_attempted = False
+        rail._verification_restore_ok = True
+        rail._verification_restore_error = ""
         try:
             def staircase():
                 return rail.verify(acknowledged=True,
                                    ref=gpu.read_vcore_mv,
-                                   log=lambda m: self.log("  " + m, None))
-            out = gpuload.induce(gpu, max_seconds=180.0, on_settled=staircase)
+                                   log=lambda m: self.log("  " + m, None),
+                                   cancelled=cancel.is_set)
+            out = gpuload.induce(gpu, max_seconds=180.0, on_settled=staircase,
+                                 cancelled=cancel.is_set)
             res["err"] = out.get("error") or ""
             res["v"] = out.get("result")
         except Exception as e:                                  # noqa: BLE001
             res["err"] = f"{type(e).__name__}: {e}"
-        if (getattr(rail, "_verification_write_attempted", False)
-                and connection == self.i2c_connection()):
-            self._i2c_recovery_for = connection
-        v = res.get("v")
-        if v is None:
-            self.log("verify: the load never settled, so nothing was measured"
-                     + (f" ({res['err']})" if res.get("err") else ""), False)
+        try:
+            if getattr(rail, "_verification_write_attempted", False):
+                if connection == self.i2c_connection():
+                    self._i2c_recovery_for = connection
+                if not getattr(rail, "_verification_restore_ok", False):
+                    # Sticky even after busy clears: ENDSESSION and main must
+                    # not mark a session with an uncertain controller clean.
+                    self._i2c_restore_failed = True
+                    detail = getattr(rail, "_verification_restore_error", "")
+                    self._i2c_restore_error = detail or "entry setting unconfirmed"
+                    res["err"] = (res.get("err", "") + "; RESTORE FAILED: "
+                                  + (detail or "entry setting unconfirmed"))
+            v = res.get("v")
+            if v is None:
+                ok, msg = False, "verification did not complete"
+            else:
+                ok, msg, _ladder = v
+            if connection != self.i2c_connection():
+                msg += "; controller connection changed; Verify again"
+            if cancel.is_set():
+                msg += "; verification cancelled"
+            ok = (bool(ok) and not res.get("err") and not cancel.is_set()
+                  and connection == self.i2c_connection())
+            self._i2c_verified = ok
+            self._i2c_verified_for = connection if ok else None
+            if res.get("err"):
+                msg += f"; {res['err']}"
+            self.log("verify: " + msg, ok)
+        finally:
+            # Even a logging/UI exception cannot strand the busy state. No DPG
+            # mutation to re-enable controls runs on this background thread.
             self._i2c_busy = False
-            return
-        ok, msg, _ladder = v
-        if connection != self.i2c_connection():
-            msg += "; controller connection changed; Verify again"
-        ok = bool(ok) and not res.get("err") and connection == self.i2c_connection()
-        self._i2c_verified = ok
-        self._i2c_verified_for = connection if ok else None
-        if res.get("err"):
-            msg += f"; load validation failed: {res['err']}"
-        self.log("verify: " + msg, ok)
-        self._i2c_busy = False  # publish completion AFTER the result
+            self._i2c_ui_pending = True
 
     def apply_i2c_rail(self, v):
         # Ordered so the cheap refusals happen before any bus traffic, and so
@@ -5541,6 +5695,8 @@ deliberately does not put behind a button."""
     def save_profile(self):
         """Named snapshot of every knob this tool can write. Saving touches no
         GPU state at all, so unlike load it is not behind guard()."""
+        if not self.profile_capture_ready():
+            return
         name = (dpg.get_value("prof_name") or "").strip()
         if not name:
             self.log("give the profile a name first", False)
@@ -5558,12 +5714,23 @@ deliberately does not put behind a button."""
         self.refresh_profile_list()
 
     def open_save_profile(self, sender=None, app_data=None, user_data=None):
+        if not self.profile_capture_ready():
+            return
         # seeded with a timestamp so the box is never empty: profiles are
         # slugged onto disk by name, so an unnamed one would be "unnamed.json"
         # and the next save would silently overwrite it
         if dpg.does_item_exist("prof_name") and not dpg.get_value("prof_name"):
             dpg.set_value("prof_name", time.strftime("tune-%Y%m%d-%H%M"))
         self.show_win(user_data="win_save")
+
+    def profile_capture_ready(self):
+        if (getattr(self, "_i2c_busy", False)
+                or getattr(self, "_profile_pending", None)
+                or getattr(self, "_profile_applying", False)
+                or getattr(self, "_closing", False)):
+            self.log("wait for verification and profile restoration before saving a profile", False)
+            return False
+        return True
 
     def open_profiles(self, sender=None, app_data=None, user_data=None):
         self.refresh_profile_list()
@@ -5759,13 +5926,14 @@ deliberately does not put behind a button."""
         self.finish_profile_load(name, state, automatic)
 
     def poll_profile_load(self):
+        if getattr(self, "_i2c_ui_pending", False) and not self._i2c_busy:
+            self._i2c_ui_pending = False
+            self.sync_lock_ui()
         pending = self._profile_pending
         if not pending or self._i2c_busy:
             return
         self._profile_pending = None
         self.sync_lock_ui()
-        for tag in ("unlock", "xoc_mode", "i2c_mode", "vlim_mode"):
-            dpg.configure_item(tag, enabled=True)
         name, state, automatic = pending
         if not self.i2c_verified():
             self.profile_failure("I2C verification failed; profile was not applied", automatic)
@@ -5894,11 +6062,11 @@ deliberately does not put behind a button."""
         mscale = self.gpu.mem_offset_scale()[0] or 1
         moff = d.get("mem_off")
         for tag, val in (("sl_core", d.get("core_off")),
-                         ("sl_mem", int(moff / mscale)
-                          if isinstance(moff, int) else None),
+                         ("sl_mem", moff / mscale
+                          if isinstance(moff, (int, float)) else None),
                          ("sl_pl", (d.get("pl_now_mw") or 0) // 1000 or None)):
             if val is not None and dpg.does_item_exist(tag):
-                dpg.set_value(tag, int(val))
+                dpg.set_value(tag, val if tag == "sl_mem" else int(val))
         vb = self.gpu.read_voltage_boost()
         if vb is not None and dpg.does_item_exist("sl_volt"):
             dpg.set_value("sl_volt", max(0, min(100, int(vb))))
@@ -6005,7 +6173,7 @@ deliberately does not put behind a button."""
             # curve be one click - see autosave_before.
             with dpg.menu(label="Profiles"):
                 dpg.add_menu_item(label="Save profile...",
-                                  callback=self.open_save_profile)
+                                  tag="mi_save_profile", callback=self.open_save_profile)
                 dpg.add_menu_item(label="Load profile...",
                                   callback=self.open_profiles)
                 dpg.add_separator()
@@ -6204,7 +6372,7 @@ deliberately does not put behind a button."""
             dpg.add_spacer(height=self.s(6))
             with dpg.group(horizontal=True):
                 dpg.add_button(label="Save", width=self.s(130),
-                               callback=self.save_profile)
+                               tag="go_save_profile", callback=self.save_profile)
                 dpg.add_button(label="Cancel", width=self.s(130),
                                callback=lambda: dpg.configure_item(
                                    "win_save", show=False))
@@ -6228,7 +6396,7 @@ deliberately does not put behind a button."""
                 dpg.add_button(label="Refresh", width=self.s(130),
                                callback=self.refresh_profile_list)
                 dpg.add_button(label="Save profile...", width=self.s(170),
-                               callback=self.open_save_profile)
+                               tag="go_open_save_profile", callback=self.open_save_profile)
                 dpg.add_button(label="Disable startup loading", width=self.s(210),
                                callback=self.disable_startup_profile)
             dpg.add_text("", tag="prof_warn", color=BAD, show=False,
@@ -6967,6 +7135,9 @@ deliberately does not put behind a button."""
                   f"controller")
 
     def tw_apply(self, sender=None, app_data=None, user_data=None):
+        if getattr(self, "_i2c_busy", False) or getattr(self, "_profile_pending", None):
+            self.log("wait for I2C verification and restoration before changing timings", False)
+            return
         if not self._tw_pending:
             return
         ft = getattr(self, "_tim_ft", None)
@@ -7009,6 +7180,9 @@ deliberately does not put behind a button."""
         self.timings_capture()
 
     def tw_restore(self, sender=None, app_data=None, user_data=None):
+        if getattr(self, "_i2c_busy", False) or getattr(self, "_profile_pending", None):
+            self.log("wait for I2C verification and restoration before restoring timings", False)
+            return
         # existing_backup_path, not card_backup_path: a backup taken before the
         # slot joined the filename still restores this card, and offering to
         # restore only the new name would hide it.
@@ -7621,6 +7795,9 @@ deliberately does not put behind a button."""
         The hold is left in force. That is the difference the label states:
         this button changes the card's state and says so. Ctrl+H, the Release
         button, or 'Reset all to stock' drop it."""
+        if getattr(self, "_i2c_busy", False) or getattr(self, "_profile_pending", None):
+            self.log("wait for I2C verification and restoration before starting another load", False)
+            return
         with self._tim_lock:
             if self._tim_busy:
                 return
@@ -8557,11 +8734,6 @@ deliberately does not put behind a button."""
         self.timings_capture()
 
         last = 0.0
-        if self._startup_request:
-            request, self._startup_request = self._startup_request, None
-            self.begin_profile_load(request["name"], request["profile"], automatic=True)
-        elif self._startup_manager and self._startup_manager.reason:
-            self.log("startup profile skipped: " + self._startup_manager.reason, False)
         # try/finally, not a bare loop: the tail below is what stops this app
         # leaving the card pinned, and the lock is the ONE write that outlives
         # the process unread. Anything the loop raises - a DPG call on a
@@ -8569,6 +8741,13 @@ deliberately does not put behind a button."""
         # skip it. Per-call guards inside the loop keep the app alive; this
         # keeps the promise even when one of them is missing.
         try:
+            # A startup profile may itself start verification. Protect that
+            # dispatch with the same restore-before-exit finally as callbacks.
+            if self._startup_request:
+                request, self._startup_request = self._startup_request, None
+                self.begin_profile_load(request["name"], request["profile"], automatic=True)
+            elif self._startup_manager and self._startup_manager.reason:
+                self.log("startup profile skipped: " + self._startup_manager.reason, False)
             while dpg.is_dearpygui_running():
                 if self._startup_manager and self._startup_manager.ending:
                     break
@@ -8618,10 +8797,17 @@ deliberately does not put behind a button."""
                 dpg.render_dearpygui_frame()
         finally:
             self._stop.set()
-            # before destroy_context: the release goes through set_lock_state,
-            # and the DPG items it writes only exist while the context does
-            self.release_on_exit()
-            dpg.destroy_context()
+            try:
+                self.stop_i2c_verification()
+            finally:
+                # Both the verifier's log and clock release use live DPG items.
+                # Join the writer first; read-only workers must not log to DPG
+                # after the context is gone either.
+                try:
+                    self.release_on_exit()
+                finally:
+                    self._dpg_ready = False
+                    dpg.destroy_context()
 
 
 def _tell(text):
@@ -8718,8 +8904,7 @@ def main(argv=None):
         app = Druta(slot)
         app._startup_manager, app._startup_request = manager, request
         try:
-            manager.watch_shutdown(lambda: not (app._i2c_busy or app._profile_pending
-                                                or app._profile_applying))
+            manager.watch_shutdown(app.shutdown_is_clean)
         except Exception as e:
             manager.block(str(e))
             app._startup_request = None
@@ -8730,7 +8915,7 @@ def main(argv=None):
                      if app.gpu_list else ""))
             return 1
         app.run()
-        clean = not (app._i2c_busy or app._profile_pending or app._profile_applying)
+        clean = app.shutdown_is_clean()
         return 0
     finally:
         manager.close(clean=clean)

@@ -195,7 +195,8 @@ class LegacyOffsetTests(unittest.TestCase):
 
                 def read(_handle, pointer):
                     co = ctypes.cast(pointer, ctypes.POINTER(n._ClockOffset)).contents
-                    co.mn, co.mx, co.off = -2000, 6000, 0
+                    co.mn, co.mx = -2000, 6000
+                    co.off = sent[-1][2] if sent else 0
                     return 0
 
                 def write(_handle, pointer):
